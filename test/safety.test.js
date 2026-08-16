@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
+const { Mongify } = require("../dist/mongify.js");
 const {
   createTestDatabase,
   removeTestDatabase,
@@ -17,6 +18,19 @@ describe("Mongify safety regressions", () => {
 
   afterEach(async () => {
     await removeTestDatabase(context);
+  });
+
+  test("rejects invalid database names", () => {
+    for (const databaseName of ["", "..", "../outside", "nested/database"]) {
+      assert.throws(
+        () =>
+          new Mongify({
+            database_name: databaseName,
+            path: context.temporaryDirectory,
+          }),
+        TypeError,
+      );
+    }
   });
 
   test("rejects collection names that escape the database directory", async () => {
@@ -45,6 +59,34 @@ describe("Mongify safety regressions", () => {
 
     assert.equal(new Set(ids).size, 2);
     assert.ok(ids.every((id) => id !== "controlled"));
+  });
+
+  test("rejects attempts to update an id", async () => {
+    const collection = await context.database.createCollection("users");
+    await collection.insert({ name: "Pamela" });
+    const original = await collection.findOne({ name: "Pamela" });
+
+    await assert.rejects(
+      () => collection.update({ name: "Pamela" }, { _id: "changed" }),
+      /_id field cannot be updated/,
+    );
+
+    const stored = await collection.findOne({ name: "Pamela" });
+    assert.equal(stored._id, original._id);
+  });
+
+  test("does not leave temporary files after an atomic write", async () => {
+    const collection = await context.database.createCollection("users");
+    await collection.insertMany([{ name: "Pamela" }, { name: "Alice" }]);
+
+    const databasePath = path.join(
+      context.temporaryDirectory,
+      "Mongify",
+      "safety",
+    );
+    const files = await fs.readdir(databasePath);
+
+    assert.deepEqual(files, ["users.json"]);
   });
 
   test("does not create a collection when deleting from a missing one", async () => {

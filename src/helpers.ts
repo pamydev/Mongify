@@ -1,19 +1,23 @@
 import fs from "fs-extra";
 import path from "path";
-import { v4 as uuid } from "uuid";
+
+const collection_queues = new Map<string, Promise<void>>();
+
 export class Helpers {
   database_path: string;
 
   constructor(args0: MongifyOptions) {
+    this._validate_name(args0?.database_name, "Database name");
+
     const home_dir =
       process.env.APPDATA ||
       (process.platform == "darwin"
         ? process.env.HOME + "/Library"
         : process.env.HOME + "/.local/share");
     const database_path = args0?.path || home_dir;
-    this.database_path = path.join(
+    this.database_path = path.resolve(
       database_path,
-      "/Mongify/",
+      "Mongify",
       args0.database_name,
     );
   }
@@ -24,14 +28,39 @@ export class Helpers {
         fs.mkdirSync(this.database_path, { recursive: true });
       } catch (e) {
         throw new Error("Error code kl3: " + e);
-        return false;
       }
     }
     return this.database_path;
   }
 
   public _get_collection_path(collection_name: string): string {
+    this._validate_name(collection_name, "Collection name");
     return path.join(this.database_path, collection_name + ".json");
+  }
+
+  public async _with_collection_lock<T>(
+    collection_name: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const collection_path = this._get_collection_path(collection_name);
+    const previous = collection_queues.get(collection_path) || Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.catch(() => undefined).then(() => gate);
+
+    collection_queues.set(collection_path, current);
+    await previous.catch(() => undefined);
+
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (collection_queues.get(collection_path) === current) {
+        collection_queues.delete(collection_path);
+      }
+    }
   }
 
   public async _purge_and_write_entire_file(
@@ -39,10 +68,25 @@ export class Helpers {
     data?: MongifyDocument[],
   ): Promise<boolean> {
     const serialized_data = JSON.stringify(data || []);
-    await fs.writeFile(
-      this._get_collection_path(collection_name),
-      serialized_data,
+    const collection_path = this._get_collection_path(collection_name);
+    const temporary_path = path.join(
+      this.database_path,
+      `.${path.basename(collection_path)}.${process.pid}.${Date.now()}.${Math.random()
+        .toString(16)
+        .slice(2)}.tmp`,
     );
+
+    try {
+      await fs.writeFile(temporary_path, serialized_data, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await fs.rename(temporary_path, collection_path);
+    } catch (error) {
+      await fs.unlink(temporary_path).catch(() => undefined);
+      throw error;
+    }
+
     return true;
   }
 
@@ -106,8 +150,29 @@ export class Helpers {
   }
 
   public async _list_files(): Promise<string[]> {
-    let names = await fs.readdir(this.database_path);
-    names = names.map((file) => file.replace(".json", ""));
-    return names;
+    const entries = await fs.readdir(this.database_path, {
+      withFileTypes: true,
+    });
+
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name.slice(0, -".json".length))
+      .sort();
+  }
+
+  private _validate_name(value: unknown, label: string): asserts value is string {
+    if (
+      typeof value !== "string" ||
+      value.trim() === "" ||
+      value === "." ||
+      value === ".." ||
+      value.includes("/") ||
+      value.includes("\\") ||
+      value.includes("\0")
+    ) {
+      throw new TypeError(
+        `${label} must be a non-empty name without path separators`,
+      );
+    }
   }
 }

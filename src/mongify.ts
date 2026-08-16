@@ -1,5 +1,3 @@
-import fs from "fs-extra";
-import path from "path";
 import { Operations } from "./operations";
 import { Helpers } from "./helpers";
 
@@ -13,21 +11,23 @@ class Main {
   }
 
   public async createCollection(collection_name: string): Promise<Collection> {
-    const names = await this.listCollections();
+    await this.helpers._with_collection_lock(collection_name, async () => {
+      const names = await this.listCollections();
 
-    if (names.includes(collection_name)) {
-      return this.getCollection(collection_name);
-    }
-
-    await this.helpers._purge_and_write_entire_file(collection_name, []);
+      if (!names.includes(collection_name)) {
+        await this.helpers._purge_and_write_entire_file(collection_name, []);
+      }
+    });
     return this.getCollection(collection_name);
   }
 
   public async deleteCollection(collection_name: string): Promise<boolean> {
-    await this.helpers._delete_file(
-      this.helpers._get_collection_path(collection_name),
-    );
-    return true;
+    return this.helpers._with_collection_lock(collection_name, async () => {
+      await this.helpers._delete_file(
+        this.helpers._get_collection_path(collection_name),
+      );
+      return true;
+    });
   }
 
   public async listCollections(): Promise<string[]> {
@@ -36,6 +36,7 @@ class Main {
   }
 
   public getCollection(collection_name: string): Collection {
+    this.helpers._get_collection_path(collection_name);
     const collection = collection_name;
 
     return {
