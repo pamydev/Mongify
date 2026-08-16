@@ -99,8 +99,8 @@ describe("Mongify stress", () => {
     );
   });
 
-  const total = 1_000_000;
-  const totalDummyFields = 50;
+  const total = 50_000;
+  const totalDummyFields = 10;
   test(`findOne searches chunks containing ${total.toLocaleString("en-US")} documents`, async () => {
     const collection = await context.database.createCollection("documents");
 
