@@ -3,6 +3,7 @@ import { Helpers } from "./helpers";
 import type {
   CollectionIndex,
   CollectionOptions,
+  CreateIndexResult,
   IndexOptions,
   MongifyDocument,
   MongifyOptions,
@@ -154,10 +155,9 @@ export class Operations {
     field: string,
     options: IndexOptions | undefined,
     collection_name: string,
-  ): Promise<boolean> {
+  ): Promise<CreateIndexResult> {
     return this.helpers._with_collection_lock(collection_name, async () => {
-      await this.helpers._create_index(collection_name, field, options);
-      return true;
+      return this.helpers._create_index(collection_name, field, options);
     });
   }
 

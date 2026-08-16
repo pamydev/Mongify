@@ -170,12 +170,27 @@ describe("Mongify functional API", () => {
       { field: "_id", unique: true },
     ]);
 
-    await users.createIndex("email", { unique: true });
+    const created = await users.createIndex("email", { unique: true });
+
+    assert.deepEqual(created, {
+      acknowledge: true,
+      indexesBefore: 1,
+      indexesAfter: 2,
+    });
 
     assert.deepEqual(await users.listIndexes(), [
       { field: "_id", unique: true },
       { field: "email", unique: true },
     ]);
+
+    const existing = await users.createIndex("email", { unique: true });
+
+    assert.deepEqual(existing, {
+      acknowledge: false,
+      indexesBefore: 2,
+      indexesAfter: 2,
+      error: "exists",
+    });
 
     await users.dropIndex("email");
 

@@ -34,6 +34,13 @@ export interface CollectionIndex {
   unique: boolean;
 }
 
+export interface CreateIndexResult {
+  acknowledge: boolean;
+  indexesBefore: number;
+  indexesAfter: number;
+  error?: "exists";
+}
+
 export interface Collection {
   find(
     query?: MongifyQuery,
@@ -48,7 +55,10 @@ export interface Collection {
   insert(document: MongifyDocument): Promise<boolean>;
   insertMany(documentsArray: MongifyDocument[]): Promise<boolean>;
   delete(query: MongifyQuery): Promise<boolean>;
-  createIndex(field: string, options?: IndexOptions): Promise<boolean>;
+  createIndex(
+    field: string,
+    options?: IndexOptions,
+  ): Promise<CreateIndexResult>;
   dropIndex(field: string): Promise<boolean>;
   listIndexes(): Promise<CollectionIndex[]>;
 }

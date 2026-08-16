@@ -49,10 +49,15 @@ const createDummyDocument = async (
 (async () => {
   const startedAt = performance.now();
   console.log("starting...");
-  // await database.getCollection("users").createIndex("name");
+  let index = await database.getCollection("users").createIndex("index");
+  console.log(index);
   let res = await database.getCollection("users").findOne({
-    name: "document-899000",
+    index: "test1",
   });
+  // await database.getCollection("users").insert({
+  //   index: "test1",
+  //   name: "Pamela Sedrez",
+  // });
   const elapsedMilliseconds = performance.now() - startedAt;
-  console.log(res.index, formatDuration(elapsedMilliseconds));
+  console.log(res, formatDuration(elapsedMilliseconds));
 })();

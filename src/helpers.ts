@@ -3,6 +3,7 @@ import path from "path";
 import { Storage } from "./storage";
 import type {
   CollectionIndex,
+  CreateIndexResult,
   IndexOptions,
   IReadEntireJsonFile,
   MongifyDocument,
@@ -132,8 +133,8 @@ export class Helpers {
     collection_name: string,
     field: string,
     options?: IndexOptions,
-  ): Promise<void> {
-    await this.storage.createIndex(collection_name, field, options);
+  ): Promise<CreateIndexResult> {
+    return this.storage.createIndex(collection_name, field, options);
   }
 
   public async _drop_index(

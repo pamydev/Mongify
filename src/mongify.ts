@@ -75,6 +75,7 @@ export type {
   Collection,
   CollectionIndex,
   CollectionOptions,
+  CreateIndexResult,
   IndexOptions,
   MongifyDocument,
   MongifyOptions,

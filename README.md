@@ -154,7 +154,12 @@ Every collection has a unique `_id` index automatically. Create indexes for fiel
 used frequently by exact-equality queries:
 
 ```ts
-await users.createIndex("email", { unique: true });
+const created = await users.createIndex("email", { unique: true });
+// { acknowledge: true, indexesBefore: 1, indexesAfter: 2 }
+
+const existing = await users.createIndex("email", { unique: true });
+// { acknowledge: false, indexesBefore: 2, indexesAfter: 2, error: "exists" }
+
 await users.createIndex("active");
 
 console.log(await users.listIndexes());
@@ -172,6 +177,9 @@ Indexes are persisted as paged B+ trees. A lookup reads only the tree path neede
 to reach the matching leaf instead of loading the complete index into memory.
 Mongify keeps a bounded page cache, verifies the current chunk signatures, and
 rebuilds a stale, missing, or corrupted index from the chunks.
+
+Calling `createIndex` for an already indexed field does not rebuild it. In that
+case `acknowledge` is `false` and `error` is `"exists"`.
 
 ## Update documents
 
@@ -221,6 +229,13 @@ interface IndexOptions {
   unique?: boolean;
 }
 
+interface CreateIndexResult {
+  acknowledge: boolean;
+  indexesBefore: number;
+  indexesAfter: number;
+  error?: "exists";
+}
+
 interface Collection {
   find(
     query?: Record<string, unknown>,
@@ -237,7 +252,10 @@ interface Collection {
     options?: UpdateOptions,
   ): Promise<boolean>;
   delete(query: Record<string, unknown>): Promise<boolean>;
-  createIndex(field: string, options?: IndexOptions): Promise<boolean>;
+  createIndex(
+    field: string,
+    options?: IndexOptions,
+  ): Promise<CreateIndexResult>;
   dropIndex(field: string): Promise<boolean>;
   listIndexes(): Promise<Array<{ field: string; unique: boolean }>>;
 }
@@ -245,7 +263,7 @@ interface Collection {
 
 ## Chunk size
 
-The default maximum chunk size is 4 MiB. Change `CHUNK_SIZE_BYTES` in
+The default maximum chunk size is 2 MiB. Change `CHUNK_SIZE_BYTES` in
 `src/config.ts` when benchmarking different chunk sizes:
 
 ```ts

@@ -9,6 +9,7 @@ import {
 import { CHUNK_SIZE_BYTES } from "./config";
 import type {
   CollectionIndex,
+  CreateIndexResult,
   IndexOptions,
   MongifyDocument,
   MongifyQuery,
@@ -313,9 +314,20 @@ export class Storage {
     collection_name: string,
     field: string,
     options?: IndexOptions,
-  ): Promise<void> {
+  ): Promise<CreateIndexResult> {
     this._validate_field(field);
     const metadata = await this._read_metadata(collection_name, true);
+    const indexesBefore = Object.keys(metadata!.indexes).length;
+
+    if (metadata!.indexes[field]) {
+      return {
+        acknowledge: false,
+        indexesBefore,
+        indexesAfter: indexesBefore,
+        error: "exists",
+      };
+    }
+
     const definition = { unique: options?.unique === true };
     const index = await this._build_index_from_chunks(
       collection_name,
@@ -330,6 +342,11 @@ export class Storage {
       generation: metadata!.generation,
       tree: index,
     });
+    return {
+      acknowledge: true,
+      indexesBefore,
+      indexesAfter: indexesBefore + 1,
+    };
   }
 
   public async dropIndex(
