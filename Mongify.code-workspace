@@ -5,6 +5,16 @@
     },
   ],
   "settings": {
-    "workbench.colorTheme": "Solarized Dark",
+    "workbench.colorTheme": "Dark 2026",
+    "editor.tokenColorCustomizations": {
+      "textMateRules": [
+        {
+          "scope": ["meta.definition.method.ts"],
+          "settings": {
+            "fontStyle": "underline",
+          },
+        },
+      ],
+    },
   },
 }

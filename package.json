@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "tsc",
+    "start": "tsc --watch",
     "build-types": "tsc --emitDeclarationOnly"
   },
   "repository": {

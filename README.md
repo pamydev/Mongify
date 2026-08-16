@@ -1,0 +1,213 @@
+# Mongify
+
+Mongify is a small file-based database for Node.js and TypeScript. It stores each collection as a JSON file, so it is useful for prototypes, local tools, tests, and applications that do not need a database server.
+
+## Features
+
+- JSON-file persistence
+- Automatic `_id` generation with UUIDs
+- Simple collection API
+- TypeScript declarations
+- No database server or external service required
+
+## Installation
+
+Install the package from npm:
+
+```bash
+npm install mongify
+```
+
+When using the repository directly, install dependencies and compile the project:
+
+```bash
+npm install
+npm run start
+```
+
+## Quick start
+
+```ts
+import { Mongify } from "mongify";
+
+const database = new Mongify({
+  database_name: "my-app",
+});
+
+const users = await database.createCollection("users");
+
+await users.insert({
+  name: "Ada Lovelace",
+  email: "ada@example.com",
+  active: true,
+});
+
+const result = await users.find({ active: true });
+console.log(result);
+```
+
+Every inserted document receives a unique `_id` automatically:
+
+```json
+{
+  "_id": "generated-uuid",
+  "name": "Ada Lovelace",
+  "email": "ada@example.com",
+  "active": true
+}
+```
+
+## Choosing the storage path
+
+By default, Mongify stores databases in the platform's application data directory:
+
+- macOS: `$HOME/Library/Preferences/mongify/<database_name>`
+- Windows: `%APPDATA%/mongify/<database_name>`
+- Linux and other platforms: `$HOME/.local/share/mongify/<database_name>`
+
+Provide `path` to choose a custom parent directory:
+
+```ts
+import { Mongify } from "mongify";
+
+const database = new Mongify({
+  database_name: "local-data",
+  path: "./data",
+});
+```
+
+Each collection is stored as `<collection_name>.json` inside the database directory.
+
+## Collections
+
+### Create and access a collection
+
+```ts
+const products = await database.createCollection("products");
+
+// Access an existing collection without creating or resetting its file.
+const existingProducts = database.getCollection("products");
+```
+
+`createCollection` initializes the collection with an empty array. Use `getCollection` when the collection may already contain data.
+
+List or delete collections:
+
+```ts
+const names = await database.listCollections();
+console.log(names); // ["products", "users"]
+
+await database.deleteCollection("products");
+```
+
+## Insert documents
+
+```ts
+await users.insert({
+  name: "Grace Hopper",
+  role: "engineer",
+});
+
+await users.insertMany([
+  { name: "Alan Turing", role: "researcher" },
+  { name: "Katherine Johnson", role: "mathematician" },
+]);
+```
+
+Both methods return `true` after the file is written.
+
+## Read documents
+
+Queries use exact equality against the first property in the query object:
+
+```ts
+const allUsers = await users.find();
+const engineers = await users.find({ role: "engineer" });
+const firstEngineer = await users.findOne({ role: "engineer" });
+
+console.log(allUsers);
+console.log(engineers);
+console.log(firstEngineer);
+```
+
+Limit the number of results with `limit`:
+
+```ts
+const firstTwoUsers = await users.find({}, { limit: 2 });
+const matchingUsers = await users.find({ active: true }, { limit: "10" });
+```
+
+`find` returns an array. `findOne` returns the first matching document, or an array when no document matches.
+
+## Update documents
+
+```ts
+await users.update(
+  { email: "ada@example.com" },
+  { active: false, role: "archived" },
+);
+```
+
+The update merges the provided fields into every matching document. Enable `upsert` to insert a document when no match exists:
+
+```ts
+await users.update(
+  { email: "new@example.com" },
+  { name: "New User", active: true },
+  { upsert: true },
+);
+```
+
+## Delete documents
+
+```ts
+await users.delete({ active: false });
+```
+
+This removes every document whose selected field exactly matches the query value. The method returns `true` after the operation.
+
+## API reference
+
+```ts
+interface MongifyOptions {
+  database_name: string;
+  path?: string;
+}
+
+interface CollectionOptions {
+  limit?: string | number;
+  skip?: string | number;
+}
+
+interface UpdateOptions {
+  upsert?: boolean;
+}
+
+interface Collection {
+  find(query?: Record<string, unknown>, options?: CollectionOptions): Promise<Record<string, unknown>[]>;
+  findOne(query?: Record<string, unknown>): Promise<Record<string, unknown> | Record<string, unknown>[]>;
+  insert(document: Record<string, unknown>): Promise<boolean>;
+  insertMany(documents: Record<string, unknown>[]): Promise<boolean>;
+  update(query: Record<string, unknown>, update: Record<string, unknown>, options?: UpdateOptions): Promise<boolean>;
+  delete(query: Record<string, unknown>): Promise<boolean>;
+}
+```
+
+## Important limitations
+
+- Mongify is intended for lightweight local workloads, not high-concurrency production databases.
+- Queries support exact equality only; operators such as `$gt`, `$in`, and `$or` are not implemented.
+- Only `limit` currently affects `find` results. The `skip` option is part of the type definition but is not applied by the current implementation.
+- `createCollection` resets the collection file. Use `getCollection` to open an existing collection.
+- Collection data is loaded and rewritten as a whole JSON array for each operation.
+
+## Development
+
+```bash
+npm run start       # Compile TypeScript into dist/
+npm run build-types # Emit declaration files only
+```
+
+## License
+
+ISC
