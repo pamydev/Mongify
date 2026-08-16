@@ -5,7 +5,13 @@
   "main": "index.js",
   "scripts": {
     "start": "tsc --watch",
-    "build-types": "tsc --emitDeclarationOnly"
+    "build": "tsc -p tsconfig.json",
+    "build-types": "tsc --emitDeclarationOnly",
+    "test": "npm run build && node --test test/functional.test.js",
+    "test:all": "npm run build && node --test test/*.test.js",
+    "test:concurrency": "npm run build && node --test test/concurrency.test.js",
+    "test:safety": "npm run build && node --test test/safety.test.js",
+    "test:stress": "npm run build && node --test test/stress.test.js"
   },
   "repository": {
     "type": "git",
