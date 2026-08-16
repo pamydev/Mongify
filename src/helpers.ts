@@ -1,10 +1,12 @@
 import fs from "fs-extra";
 import path from "path";
+import { CollectionFileLock } from "./file-lock";
 import { Storage } from "./storage";
 import type {
   CollectionIndex,
   CreateIndexResult,
   IndexOptions,
+  IndexFields,
   IReadEntireJsonFile,
   MongifyDocument,
   MongifyOptions,
@@ -59,31 +61,47 @@ export class Helpers {
     collection_queues.set(collection_path, current);
     await previous.catch(() => undefined);
 
+    let file_lock: CollectionFileLock | undefined;
     try {
+      file_lock = await CollectionFileLock.acquire(
+        this.database_path,
+        collection_name,
+      );
+      await this.storage.recover(collection_name);
       return await operation();
     } finally {
-      release();
-      if (collection_queues.get(collection_path) === current) {
-        collection_queues.delete(collection_path);
+      try {
+        await file_lock?.release();
+      } finally {
+        release();
+        if (collection_queues.get(collection_path) === current) {
+          collection_queues.delete(collection_path);
+        }
       }
     }
   }
 
   public async _create_collection(collection_name: string): Promise<void> {
     this._get_collection_path(collection_name);
-    await this.storage.createCollection(collection_name);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.createCollection(collection_name),
+    );
   }
 
   public async _delete_collection(collection_name: string): Promise<void> {
     this._get_collection_path(collection_name);
-    await this.storage.deleteCollection(collection_name);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.deleteCollection(collection_name),
+    );
   }
 
   public async _purge_and_write_entire_file(
     collection_name: string,
     data?: MongifyDocument[],
   ): Promise<boolean> {
-    await this.storage.replaceAll(collection_name, data || []);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.replaceAll(collection_name, data || []),
+    );
     return true;
   }
 
@@ -91,7 +109,9 @@ export class Helpers {
     collection_name: string,
     documents: MongifyDocument[],
   ): Promise<boolean> {
-    await this.storage.append(collection_name, documents);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.append(collection_name, documents),
+    );
     return true;
   }
 
@@ -111,6 +131,7 @@ export class Helpers {
     first = false,
     projection?: Record<string, 0 | 1 | boolean>,
     skip = 0,
+    sort?: Record<string, 1 | -1>,
   ): Promise<MongifyDocument[]> {
     return this.storage.find(
       collection_name,
@@ -119,6 +140,7 @@ export class Helpers {
       first,
       projection,
       skip,
+      sort,
     );
   }
 
@@ -128,29 +150,37 @@ export class Helpers {
     update: MongifyDocument,
     upsert = false,
   ): Promise<void> {
-    await this.storage.update(collection_name, query, update, upsert);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.update(collection_name, query, update, upsert),
+    );
   }
 
   public async _delete_documents(
     collection_name: string,
     query: MongifyQuery,
   ): Promise<void> {
-    await this.storage.delete(collection_name, query);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.delete(collection_name, query),
+    );
   }
 
   public async _create_index(
     collection_name: string,
-    field: string,
+    field: IndexFields,
     options?: IndexOptions,
   ): Promise<CreateIndexResult> {
-    return this.storage.createIndex(collection_name, field, options);
+    return this.storage.transaction(collection_name, () =>
+      this.storage.createIndex(collection_name, field, options),
+    );
   }
 
   public async _drop_index(
     collection_name: string,
-    field: string,
+    field: IndexFields,
   ): Promise<void> {
-    await this.storage.dropIndex(collection_name, field);
+    await this.storage.transaction(collection_name, () =>
+      this.storage.dropIndex(collection_name, field),
+    );
   }
 
   public async _list_indexes(

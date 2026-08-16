@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
+import { JournalTransaction } from "./journal";
 import {
   B_TREE_MAX_KEYS,
   B_TREE_PAGE_CACHE_SIZE,
@@ -10,12 +11,16 @@ import {
 export interface BTreeReference {
   chunk: string;
   id: string;
+  offset?: number;
+  length?: number;
+  dates?: Array<[string[], number]>;
 }
 
-export interface BTreeChunkSignature {
-  name: string;
-  size: number;
-  modified: number;
+export interface BTreeRange {
+  lower?: string;
+  lowerInclusive?: boolean;
+  upper?: string;
+  upperInclusive?: boolean;
 }
 
 interface LeafPage {
@@ -44,7 +49,7 @@ interface BTreeMetadata {
   unique: boolean;
   root: number;
   nextPageId: number;
-  chunks: BTreeChunkSignature[];
+  revision: number;
 }
 
 interface BuildEntry {
@@ -83,7 +88,7 @@ export class BTreeIndex {
       field: string;
       generation: string;
       unique: boolean;
-      chunks: BTreeChunkSignature[];
+      revision: number;
     },
   ): Promise<BTreeIndex> {
     const serialized = await fs.readFile(path.join(directory, "metadata.json"), "utf8");
@@ -95,7 +100,7 @@ export class BTreeIndex {
       metadata.unique !== expected.unique ||
       !Number.isInteger(metadata.root) ||
       !Number.isInteger(metadata.nextPageId) ||
-      JSON.stringify(metadata.chunks) !== JSON.stringify(expected.chunks)
+      metadata.revision !== expected.revision
     ) {
       throw new Error(`Invalid B-tree index: ${expected.field}`);
     }
@@ -111,7 +116,7 @@ export class BTreeIndex {
       field: string;
       generation: string;
       unique: boolean;
-      chunks: BTreeChunkSignature[];
+      revision: number;
       entries: Map<string, BTreeReference[]>;
     },
   ): Promise<BTreeIndex> {
@@ -133,7 +138,9 @@ export class BTreeIndex {
       const sorted: BuildEntry[] = Array.from(options.entries, ([key, references]) => ({
         key,
         references,
-      })).sort((left, right) => left.key.localeCompare(right.key));
+      })).sort((left, right) =>
+        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+      );
 
       if (options.unique) {
         const duplicate = sorted.find(({ references }) => references.length > 1);
@@ -208,13 +215,14 @@ export class BTreeIndex {
         unique: options.unique,
         root: level[0].id,
         nextPageId: next_page_id,
-        chunks: options.chunks,
+        revision: options.revision,
       };
       await fs.writeFile(
         path.join(temporary_directory, "metadata.json"),
         JSON.stringify(metadata),
         "utf8",
       );
+      await JournalTransaction.beforeWrite(directory);
       await fs.remove(directory);
       await fs.rename(temporary_directory, directory);
       BTreeIndex.clearCache(directory);
@@ -241,16 +249,52 @@ export class BTreeIndex {
       : [];
   }
 
+  public async range(bounds: BTreeRange): Promise<BTreeReference[]> {
+    let leaf: LeafPage;
+    let index = 0;
+    if (bounds.lower !== undefined) {
+      const found = await this._find_leaf(bounds.lower);
+      leaf = found.leaf;
+      index = found.index;
+      if (
+        bounds.lowerInclusive === false &&
+        leaf.keys[index] === bounds.lower
+      ) {
+        index += 1;
+      }
+    } else {
+      leaf = await this._leftmost_leaf();
+    }
+
+    const references: BTreeReference[] = [];
+    while (true) {
+      for (; index < leaf.keys.length; index += 1) {
+        const key = leaf.keys[index];
+        if (
+          bounds.upper !== undefined &&
+          (key > bounds.upper ||
+            (key === bounds.upper && bounds.upperInclusive === false))
+        ) {
+          return references;
+        }
+        references.push(...leaf.values[index].map((reference) => ({ ...reference })));
+      }
+      if (leaf.next === undefined) return references;
+      leaf = (await this._read_page(leaf.next)) as LeafPage;
+      index = 0;
+    }
+  }
+
   public async insertMany(
     entries: Array<{ key: string; reference: BTreeReference }>,
-    chunks: BTreeChunkSignature[],
+    revision: number,
   ): Promise<void> {
     this._begin_operation();
     try {
       for (const entry of entries) {
         await this._insert(entry.key, entry.reference);
       }
-      this.metadata.chunks = chunks;
+      this.metadata.revision = revision;
       await this._commit_operation();
     } catch (error) {
       this._end_operation();
@@ -261,7 +305,7 @@ export class BTreeIndex {
   public async replaceReferences(
     previous: Array<{ key: string; reference: BTreeReference }>,
     replacements: Array<{ key: string; reference: BTreeReference }>,
-    chunks: BTreeChunkSignature[],
+    revision: number,
   ): Promise<void> {
     this._begin_operation();
     try {
@@ -271,7 +315,7 @@ export class BTreeIndex {
       for (const entry of replacements) {
         await this._insert(entry.key, entry.reference);
       }
-      this.metadata.chunks = chunks;
+      this.metadata.revision = revision;
       await this._commit_operation();
     } catch (error) {
       this._end_operation();
@@ -279,8 +323,8 @@ export class BTreeIndex {
     }
   }
 
-  public async updateChunks(chunks: BTreeChunkSignature[]): Promise<void> {
-    this.metadata.chunks = chunks;
+  public async updateRevision(revision: number): Promise<void> {
+    this.metadata.revision = revision;
     await this._atomic_write(
       path.join(this.directory, "metadata.json"),
       JSON.stringify(this.metadata),
@@ -397,6 +441,14 @@ export class BTreeIndex {
     return { leaf: page, index: this._lower_bound(page.keys, key), parents };
   }
 
+  private async _leftmost_leaf(): Promise<LeafPage> {
+    let page = await this._read_page(this.metadata.root);
+    while (!page.leaf) {
+      page = await this._read_page((page as InternalPage).children[0]);
+    }
+    return page;
+  }
+
   private _lower_bound(keys: string[], target: string): number {
     let low = 0;
     let high = keys.length;
@@ -507,6 +559,7 @@ export class BTreeIndex {
   }
 
   private async _atomic_write(file_path: string, data: string): Promise<void> {
+    await JournalTransaction.beforeWrite(file_path);
     await fs.ensureDir(path.dirname(file_path));
     const temporary_path = path.join(
       path.dirname(file_path),

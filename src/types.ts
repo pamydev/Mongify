@@ -12,14 +12,42 @@ export interface MongifyDocument {
   [key: string]: any;
 }
 
-export interface MongifyQuery {
-  [key: string]: any;
-}
+type QueryOperators<T> = {
+  $lt?: T;
+  $lte?: T;
+  $gt?: T;
+  $gte?: T;
+  $in?: T[];
+  $nin?: T[];
+  $not?: QueryCondition<T>;
+  $exists?: boolean;
+  $type?: string | string[];
+  $regex?: T extends string ? string | RegExp : never;
+  $options?: T extends string ? string : never;
+};
 
-export interface CollectionOptions {
+type QueryCondition<T> =
+  | T
+  | QueryOperators<T>
+  | (NonNullable<T> extends readonly any[]
+      ? never
+      : NonNullable<T> extends object
+        ? MongifyQuery<NonNullable<T>>
+        : never);
+
+export type MongifyQuery<T extends object = MongifyDocument> = {
+  [K in keyof T]?: QueryCondition<T[K]>;
+} & {
+  $and?: MongifyQuery<T>[];
+  $or?: MongifyQuery<T>[];
+  $not?: MongifyQuery<T>;
+};
+
+export interface CollectionOptions<T extends object = MongifyDocument> {
   limit?: string | number;
   skip?: string | number;
-  projection?: Record<string, 0 | 1 | boolean>;
+  projection?: Partial<Record<Extract<keyof T, string>, 0 | 1 | boolean>>;
+  sort?: Partial<Record<Extract<keyof T, string>, 1 | -1>>;
 }
 
 export interface UpdateOptions {
@@ -30,8 +58,12 @@ export interface IndexOptions {
   unique?: boolean;
 }
 
+export type IndexFields<T extends object = MongifyDocument> =
+  | Extract<keyof T, string>
+  | Array<Extract<keyof T, string>>;
+
 export interface CollectionIndex {
-  field: string;
+  field: IndexFields;
   unique: boolean;
 }
 
@@ -42,24 +74,38 @@ export interface CreateIndexResult {
   error?: "exists";
 }
 
-export interface Collection {
+export type StoredDocument<T extends object> = Omit<T, "_id"> & {
+  _id: string;
+};
+
+export type InsertDocument<T extends object> = Omit<T, "_id"> & {
+  _id?: never;
+};
+
+export type UpdateDocument<T extends object> = Partial<Omit<T, "_id">> & {
+  _id?: never;
+};
+
+export interface Collection<T extends object = MongifyDocument> {
   find(
-    query?: MongifyQuery,
-    options?: CollectionOptions,
-  ): Promise<MongifyDocument[]>;
-  findOne(query?: MongifyQuery): Promise<MongifyDocument | null>;
+    query?: MongifyQuery<StoredDocument<T>>,
+    options?: CollectionOptions<StoredDocument<T>>,
+  ): Promise<StoredDocument<T>[]>;
+  findOne(
+    query?: MongifyQuery<StoredDocument<T>>,
+  ): Promise<StoredDocument<T> | null>;
   update(
-    query: MongifyQuery,
-    update: MongifyDocument,
+    query: MongifyQuery<StoredDocument<T>>,
+    update: UpdateDocument<T>,
     options?: UpdateOptions,
   ): Promise<boolean>;
-  insert(document: MongifyDocument): Promise<boolean>;
-  insertMany(documentsArray: MongifyDocument[]): Promise<boolean>;
-  delete(query: MongifyQuery): Promise<boolean>;
+  insert(document: InsertDocument<T>): Promise<boolean>;
+  insertMany(documentsArray: InsertDocument<T>[]): Promise<boolean>;
+  delete(query: MongifyQuery<StoredDocument<T>>): Promise<boolean>;
   createIndex(
-    field: string,
+    field: IndexFields<StoredDocument<T>>,
     options?: IndexOptions,
   ): Promise<CreateIndexResult>;
-  dropIndex(field: string): Promise<boolean>;
+  dropIndex(field: IndexFields<StoredDocument<T>>): Promise<boolean>;
   listIndexes(): Promise<CollectionIndex[]>;
 }

@@ -2,6 +2,7 @@ const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  getSimpleRangeQuery,
   matchesQuery,
   normalizeQueryCount,
   projectDocument,
@@ -41,6 +42,17 @@ describe("Mongify query operators", () => {
       }),
       false,
     );
+  });
+
+  test("matches string ranges and identifies an indexable interval", () => {
+    assert.equal(matchesQuery({ name: "Pamela" }, { name: { $gte: "P", $lt: "Q" } }), true);
+    assert.equal(matchesQuery({ name: "Alice" }, { name: { $gte: "P" } }), false);
+    assert.deepEqual(getSimpleRangeQuery({ score: { $gte: -10, $lt: 20 } }), {
+      field: "score",
+      lower: { value: -10, inclusive: true },
+      upper: { value: 20, inclusive: false },
+    });
+    assert.equal(getSimpleRangeQuery({ score: { $in: [1, 2] } }), undefined);
   });
 
   test("does not compare incompatible types", () => {

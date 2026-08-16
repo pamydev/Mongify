@@ -2,6 +2,12 @@ import type { MongifyDocument, MongifyQuery } from "./types";
 
 const comparison_operators = new Set(["$lt", "$lte", "$gt", "$gte"]);
 
+export interface SimpleRangeQuery {
+  field: string;
+  lower?: { value: number | string | Date; inclusive: boolean };
+  upper?: { value: number | string | Date; inclusive: boolean };
+}
+
 export function matchesQuery(
   document: MongifyDocument,
   query?: MongifyQuery,
@@ -44,6 +50,60 @@ export function isSimpleEqualityQuery(
   }
   const value = query[Object.keys(query)[0]];
   return !isOperatorExpression(value) && !isNestedObject(value);
+}
+
+export function getSimpleEqualityQuery(
+  query?: MongifyQuery,
+): Record<string, any> | undefined {
+  if (!query || Object.keys(query).length === 0) return undefined;
+  if (
+    Object.entries(query).some(
+      ([field, value]) =>
+        field.startsWith("$") ||
+        isOperatorExpression(value) ||
+        isNestedObject(value),
+    )
+  ) {
+    return undefined;
+  }
+  return query;
+}
+
+export function getSimpleRangeQuery(
+  query?: MongifyQuery,
+): SimpleRangeQuery | undefined {
+  if (!query || Object.keys(query).length !== 1) return undefined;
+  const field = Object.keys(query)[0];
+  const condition = query[field];
+  if (!isOperatorExpression(condition)) return undefined;
+  const operators = Object.keys(condition);
+  if (
+    operators.length === 0 ||
+    !operators.every((operator) => comparison_operators.has(operator)) ||
+    operators.filter((operator) => operator === "$gt" || operator === "$gte")
+      .length > 1 ||
+    operators.filter((operator) => operator === "$lt" || operator === "$lte")
+      .length > 1
+  ) {
+    return undefined;
+  }
+
+  const values = Object.values(condition);
+  if (!values.every(isRangeValue)) return undefined;
+  if (new Set(values.map(rangeValueType)).size !== 1) return undefined;
+
+  const result: SimpleRangeQuery = { field };
+  if ("$gt" in condition) {
+    result.lower = { value: condition.$gt, inclusive: false };
+  } else if ("$gte" in condition) {
+    result.lower = { value: condition.$gte, inclusive: true };
+  }
+  if ("$lt" in condition) {
+    result.upper = { value: condition.$lt, inclusive: false };
+  } else if ("$lte" in condition) {
+    result.upper = { value: condition.$lte, inclusive: true };
+  }
+  return result;
 }
 
 export function projectDocument(
@@ -220,7 +280,7 @@ function compare(value: any, operand: any, operator: string): boolean {
 
 function comparableValue(
   value: any,
-): { type: "date" | "number"; value: number } | undefined {
+): { type: "date" | "number"; value: number } | { type: "string"; value: string } | undefined {
   if (value instanceof Date) {
     const timestamp = value.getTime();
     return Number.isFinite(timestamp)
@@ -229,7 +289,21 @@ function comparableValue(
   }
   return typeof value === "number" && Number.isFinite(value)
     ? { type: "number", value }
-    : undefined;
+    : typeof value === "string"
+      ? { type: "string", value }
+      : undefined;
+}
+
+function isRangeValue(value: any): value is number | string | Date {
+  return (
+    (typeof value === "number" && Number.isFinite(value)) ||
+    typeof value === "string" ||
+    (value instanceof Date && Number.isFinite(value.getTime()))
+  );
+}
+
+function rangeValueType(value: number | string | Date): string {
+  return value instanceof Date ? "date" : typeof value;
 }
 
 function valuesEqual(left: any, right: any): boolean {

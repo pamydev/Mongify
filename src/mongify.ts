@@ -5,6 +5,7 @@ import type {
   CollectionOptions,
   MongifyOptions,
   MongifyQuery,
+  MongifyDocument,
 } from "./types";
 
 class Main {
@@ -16,7 +17,9 @@ class Main {
     this.helpers._create_database();
   }
 
-  public async createCollection(collection_name: string): Promise<Collection> {
+  public async createCollection<
+    T extends object = MongifyDocument,
+  >(collection_name: string): Promise<Collection<T>> {
     await this.helpers._with_collection_lock(collection_name, async () => {
       const names = await this.listCollections();
 
@@ -24,7 +27,7 @@ class Main {
         await this.helpers._create_collection(collection_name);
       }
     });
-    return this.getCollection(collection_name);
+    return this.getCollection<T>(collection_name);
   }
 
   public async deleteCollection(collection_name: string): Promise<boolean> {
@@ -39,7 +42,9 @@ class Main {
     return names;
   }
 
-  public getCollection(collection_name: string): Collection {
+  public getCollection<T extends object = MongifyDocument>(
+    collection_name: string,
+  ): Collection<T> {
     this.helpers._get_collection_path(collection_name);
     const collection = collection_name;
 
@@ -67,7 +72,7 @@ class Main {
         this.operations.dropIndex(field, collection),
 
       listIndexes: async () => this.operations.listIndexes(collection),
-    };
+    } as Collection<T>;
   }
 }
 export { Main as Mongify };
@@ -77,8 +82,12 @@ export type {
   CollectionOptions,
   CreateIndexResult,
   IndexOptions,
+  IndexFields,
   MongifyDocument,
   MongifyOptions,
   MongifyQuery,
+  StoredDocument,
+  InsertDocument,
+  UpdateDocument,
   UpdateOptions,
 } from "./types";

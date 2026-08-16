@@ -6,6 +6,7 @@ import type {
   CollectionOptions,
   CreateIndexResult,
   IndexOptions,
+  IndexFields,
   MongifyDocument,
   MongifyOptions,
   MongifyQuery,
@@ -134,6 +135,7 @@ export class Operations {
         false,
         options?.projection,
         skip,
+        options?.sort,
       );
     });
   }
@@ -155,7 +157,7 @@ export class Operations {
   }
 
   public async createIndex(
-    field: string,
+    field: IndexFields,
     options: IndexOptions | undefined,
     collection_name: string,
   ): Promise<CreateIndexResult> {
@@ -165,7 +167,7 @@ export class Operations {
   }
 
   public async dropIndex(
-    field: string,
+    field: IndexFields,
     collection_name: string,
   ): Promise<boolean> {
     return this.helpers._with_collection_lock(collection_name, async () => {

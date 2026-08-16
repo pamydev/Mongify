@@ -1,36 +1,51 @@
 import { randomUUID } from "node:crypto";
+import { open } from "node:fs/promises";
 import fs from "fs-extra";
 import path from "path";
 import {
   BTreeIndex,
-  type BTreeChunkSignature,
   type BTreeReference,
 } from "./btree-index";
 import { CHUNK_SIZE_BYTES } from "./config";
-import { isSimpleEqualityQuery, matchesQuery, projectDocument } from "./query";
+import { JournalTransaction } from "./journal";
+import {
+  getSimpleRangeQuery,
+  getSimpleEqualityQuery,
+  matchesQuery,
+  projectDocument,
+  type SimpleRangeQuery,
+} from "./query";
 import type {
   CollectionIndex,
   CreateIndexResult,
   IndexOptions,
+  IndexFields,
   MongifyDocument,
   MongifyQuery,
 } from "./types";
 
 interface IndexDefinition {
+  fields: string[];
   unique: boolean;
 }
 
 interface CollectionMetadata {
   format: "mongify-chunks-v1";
   generation: string;
+  revision: number;
   indexes: Record<string, IndexDefinition>;
 }
 
 type IndexReference = BTreeReference;
-type ChunkSignature = BTreeChunkSignature;
+interface ChunkSignature {
+  name: string;
+  size: number;
+  modified: number;
+}
 
 interface CachedIndex {
   generation: string;
+  revision: number;
   tree: BTreeIndex;
 }
 
@@ -63,6 +78,11 @@ interface PreparedChunk {
   serialized: string;
   bytes: number;
   dateCount: number;
+  locations: Array<{
+    offset: number;
+    length: number;
+    dates: Array<[string[], number]>;
+  }>;
 }
 
 const CHUNK_FORMAT = "mongify-chunk-v1";
@@ -75,6 +95,14 @@ const index_cache = new Map<string, CachedIndex>();
 export class Storage {
   constructor(private database_path: string) {}
 
+  public async transaction<T>(collection_name: string, operation: () => Promise<T>): Promise<T> {
+    return JournalTransaction.run(this.database_path, collection_name, operation);
+  }
+
+  public async recover(collection_name: string): Promise<void> {
+    await JournalTransaction.recover(this.database_path, collection_name);
+  }
+
   public async createCollection(collection_name: string): Promise<void> {
     const existing = await this._read_metadata(collection_name, false);
     if (existing) {
@@ -85,19 +113,22 @@ export class Storage {
     await fs.ensureDir(this._chunks_path(collection_name, metadata.generation));
     await fs.ensureDir(this._indexes_path(collection_name));
     await this._write_metadata(collection_name, metadata);
+    const id_index = this._index_name(["_id"]);
     await BTreeIndex.build(
-      this._index_path(collection_name, "_id"),
+      this._index_path(collection_name, id_index),
       {
-        field: "_id",
+        field: id_index,
         generation: metadata.generation,
         unique: true,
-        chunks: [],
+        revision: metadata.revision,
         entries: new Map(),
       },
     );
   }
 
   public async deleteCollection(collection_name: string): Promise<void> {
+    await JournalTransaction.beforeWrite(this._manifest_path(collection_name));
+    await JournalTransaction.beforeWrite(this._collection_data_path(collection_name));
     await fs.unlink(this._manifest_path(collection_name));
     await fs.remove(this._collection_data_path(collection_name));
     this._clear_collection_cache(collection_name);
@@ -124,6 +155,7 @@ export class Storage {
     const next: CollectionMetadata = {
       ...current!,
       generation: randomUUID(),
+      revision: current!.revision + 1,
     };
     const next_generation_path = this._generation_path(
       collection_name,
@@ -139,15 +171,21 @@ export class Storage {
       committed = true;
       this._clear_collection_cache(collection_name);
 
-      for (const [field, tree] of indexes) {
-        index_cache.set(this._cache_key(collection_name, field), {
+      for (const [index_name, tree] of indexes) {
+        index_cache.set(this._cache_key(collection_name, index_name), {
           generation: next.generation,
+          revision: next.revision,
           tree,
         });
       }
 
       if (current?.generation && current.generation !== next.generation) {
-        await fs.remove(this._generation_path(collection_name, current.generation));
+        const previous_generation = this._generation_path(
+          collection_name,
+          current.generation,
+        );
+        await JournalTransaction.beforeWrite(previous_generation);
+        await fs.remove(previous_generation);
       }
     } catch (error) {
       if (!committed) {
@@ -168,8 +206,11 @@ export class Storage {
     const metadata = await this._read_metadata(collection_name, true);
     const indexes = new Map<string, BTreeIndex>();
 
-    for (const [field] of Object.entries(metadata!.indexes)) {
-      indexes.set(field, await this._load_index(collection_name, metadata!, field));
+    for (const [index_name] of Object.entries(metadata!.indexes)) {
+      indexes.set(
+        index_name,
+        await this._load_index(collection_name, metadata!, index_name),
+      );
     }
 
     await this._validate_unique_values(metadata!, indexes, documents);
@@ -179,14 +220,21 @@ export class Storage {
       documents,
     );
 
-    const signatures = await this._chunk_signatures(collection_name, metadata!);
-    for (const [field, tree] of indexes) {
-      await tree.insertMany(this._tree_entries(field, stored), signatures);
-      index_cache.set(this._cache_key(collection_name, field), {
+    const next_revision = metadata!.revision + 1;
+    for (const [index_name, tree] of indexes) {
+      const definition = metadata!.indexes[index_name];
+      await tree.insertMany(
+        this._tree_entries(definition.fields, stored),
+        next_revision,
+      );
+      index_cache.set(this._cache_key(collection_name, index_name), {
         generation: metadata!.generation,
+        revision: next_revision,
         tree,
       });
     }
+    metadata!.revision = next_revision;
+    await this._write_metadata(collection_name, metadata!);
   }
 
   public async find(
@@ -196,30 +244,62 @@ export class Storage {
     first = false,
     projection?: Record<string, 0 | 1 | boolean>,
     skip = 0,
+    sort?: Record<string, 1 | -1>,
   ): Promise<MongifyDocument[]> {
     if (limit === 0) {
       return [];
+    }
+    if (sort !== undefined) {
+      this._validate_sort(sort);
+      const matches = await this.find(
+        collection_name,
+        query,
+        undefined,
+        false,
+        undefined,
+        0,
+      );
+      const sorted = this._sort_documents(matches, sort).slice(
+        skip,
+        limit === undefined ? undefined : skip + limit,
+      );
+      return sorted.map((document) => projectDocument(document, projection));
     }
     const metadata = await this._read_metadata(collection_name, false);
     if (!metadata) {
       return [];
     }
 
-    if (isSimpleEqualityQuery(query)) {
-      const field = Object.keys(query)[0];
-      const value = query[field];
-      if (metadata.indexes[field]) {
+    const equality_index = this._find_equality_index(metadata, query);
+    if (equality_index) {
         return this._find_with_index(
           collection_name,
           metadata,
-          field,
-          value,
+          query!,
+          equality_index,
           limit,
           first,
           projection,
           skip,
         );
-      }
+    }
+
+    const range = getSimpleRangeQuery(query);
+    const range_index = range
+      ? this._find_single_field_index(metadata, range.field)
+      : undefined;
+    if (range && range_index) {
+      return this._find_with_range_index(
+        collection_name,
+        metadata,
+        query!,
+        range,
+        range_index,
+        limit,
+        first,
+        projection,
+        skip,
+      );
     }
 
     return this._scan_chunks(
@@ -270,18 +350,39 @@ export class Storage {
       document: { ...match.document, ...update },
       reference: match.reference,
     }));
-    await this._validate_unique_replacements(indexes, matches, replacements);
+    await this._validate_unique_replacements(
+      metadata,
+      indexes,
+      matches,
+      replacements,
+    );
 
+    const previous_chunk_documents: StoredDocument[] = [];
+    const next_chunk_documents: StoredDocument[] = [];
     for (const chunk of matched_chunks.values()) {
+      previous_chunk_documents.push(
+        ...chunk.documents.map((document) => ({
+          document,
+          reference: { chunk: chunk.name, id: String(document._id) },
+        })),
+      );
       for (const match of chunk.matches) {
         chunk.documents[match.position] = { ...match.document, ...update };
       }
+      const prepared = this._prepare_chunk(chunk.documents);
       await this._atomic_write(
         path.join(
           this._chunks_path(collection_name, metadata.generation),
           chunk.name,
         ),
-        this._serialize_chunk(chunk.documents),
+        prepared.serialized,
+      );
+      next_chunk_documents.push(
+        ...this._stored_documents_for_chunk(
+          chunk.name,
+          chunk.documents,
+          prepared,
+        ),
       );
     }
 
@@ -289,8 +390,8 @@ export class Storage {
       collection_name,
       metadata,
       indexes,
-      matches,
-      replacements,
+      previous_chunk_documents,
+      next_chunk_documents,
     );
   }
 
@@ -316,15 +417,27 @@ export class Storage {
     }
 
     const indexes = await this._load_all_indexes(collection_name, metadata);
+    const previous_chunk_documents: StoredDocument[] = [];
+    const next_chunk_documents: StoredDocument[] = [];
     for (const chunk of matched_chunks.values()) {
+      previous_chunk_documents.push(
+        ...chunk.documents.map((document) => ({
+          document,
+          reference: { chunk: chunk.name, id: String(document._id) },
+        })),
+      );
       const positions = new Set(chunk.matches.map(({ position }) => position));
       const remaining = chunk.documents.filter((_, index) => !positions.has(index));
+      const prepared = this._prepare_chunk(remaining);
       await this._atomic_write(
         path.join(
           this._chunks_path(collection_name, metadata.generation),
           chunk.name,
         ),
-        this._serialize_chunk(remaining),
+        prepared.serialized,
+      );
+      next_chunk_documents.push(
+        ...this._stored_documents_for_chunk(chunk.name, remaining, prepared),
       );
     }
 
@@ -332,21 +445,22 @@ export class Storage {
       collection_name,
       metadata,
       indexes,
-      matches,
-      [],
+      previous_chunk_documents,
+      next_chunk_documents,
     );
   }
 
   public async createIndex(
     collection_name: string,
-    field: string,
+    field: IndexFields,
     options?: IndexOptions,
   ): Promise<CreateIndexResult> {
-    this._validate_field(field);
+    const fields = this._normalize_index_fields(field);
+    const index_name = this._index_name(fields);
     const metadata = await this._read_metadata(collection_name, true);
     const indexesBefore = Object.keys(metadata!.indexes).length;
 
-    if (metadata!.indexes[field]) {
+    if (metadata!.indexes[index_name]) {
       return {
         acknowledge: false,
         indexesBefore,
@@ -355,18 +469,22 @@ export class Storage {
       };
     }
 
-    const definition = { unique: options?.unique === true };
+    const definition: IndexDefinition = {
+      fields,
+      unique: options?.unique === true,
+    };
     const index = await this._build_index_from_chunks(
       collection_name,
       metadata!,
-      field,
-      definition.unique,
+      index_name,
+      definition,
     );
 
-    metadata!.indexes[field] = definition;
+    metadata!.indexes[index_name] = definition;
     await this._write_metadata(collection_name, metadata!);
-    index_cache.set(this._cache_key(collection_name, field), {
+    index_cache.set(this._cache_key(collection_name, index_name), {
       generation: metadata!.generation,
+      revision: metadata!.revision,
       tree: index,
     });
     return {
@@ -378,22 +496,27 @@ export class Storage {
 
   public async dropIndex(
     collection_name: string,
-    field: string,
+    field: IndexFields,
   ): Promise<void> {
-    if (field === "_id") {
+    const fields = this._normalize_index_fields(field);
+    const index_name = this._index_name(fields);
+    if (fields.length === 1 && fields[0] === "_id") {
       throw new TypeError("The _id index cannot be dropped");
     }
 
     const metadata = await this._read_metadata(collection_name, false);
-    if (!metadata?.indexes[field]) {
+    if (!metadata?.indexes[index_name]) {
       return;
     }
 
-    delete metadata.indexes[field];
+    delete metadata.indexes[index_name];
     await this._write_metadata(collection_name, metadata);
-    await fs.remove(this._index_path(collection_name, field));
-    BTreeIndex.clearCache(this._index_path(collection_name, field));
-    index_cache.delete(this._cache_key(collection_name, field));
+    await JournalTransaction.beforeWrite(
+      this._index_path(collection_name, index_name),
+    );
+    await fs.remove(this._index_path(collection_name, index_name));
+    BTreeIndex.clearCache(this._index_path(collection_name, index_name));
+    index_cache.delete(this._cache_key(collection_name, index_name));
   }
 
   public async listIndexes(collection_name: string): Promise<CollectionIndex[]> {
@@ -403,8 +526,16 @@ export class Storage {
     }
 
     return Object.entries(metadata.indexes)
-      .map(([field, definition]) => ({ field, unique: definition.unique }))
-      .sort((left, right) => left.field.localeCompare(right.field));
+      .map(([, definition]) => ({
+        field:
+          definition.fields.length === 1
+            ? definition.fields[0]
+            : [...definition.fields],
+        unique: definition.unique,
+      }))
+      .sort((left, right) =>
+        JSON.stringify(left.field).localeCompare(JSON.stringify(right.field)),
+      );
   }
 
   public async totalChunkSize(collection_name: string): Promise<number> {
@@ -421,7 +552,8 @@ export class Storage {
     return {
       format: "mongify-chunks-v1",
       generation: randomUUID(),
-      indexes: { _id: { unique: true } },
+      revision: 0,
+      indexes: { _id: { fields: ["_id"], unique: true } },
     };
   }
 
@@ -449,6 +581,8 @@ export class Storage {
     if (
       metadata?.format !== "mongify-chunks-v1" ||
       typeof metadata.generation !== "string" ||
+      !Number.isSafeInteger(metadata.revision) ||
+      metadata.revision < 0 ||
       !metadata.indexes
     ) {
       throw new Error(`Unsupported collection format: ${collection_name}`);
@@ -487,10 +621,12 @@ export class Storage {
         return;
       }
       const name = this._chunk_name(chunk_number);
+      const prepared_chunk = this._prepare_serialized_chunk(prepared_documents);
       await this._atomic_write(
         path.join(chunks_path, name),
-        this._prepare_serialized_chunk(prepared_documents).serialized,
+        prepared_chunk.serialized,
       );
+      stored.push(...this._stored_documents_for_chunk(name, chunk, prepared_chunk));
       chunk = [];
       prepared_documents = [];
       chunk_bytes = EMPTY_CHUNK_BYTES;
@@ -513,7 +649,6 @@ export class Storage {
         await flush();
       }
 
-      const chunk_name = this._chunk_name(chunk_number);
       chunk.push(document);
       prepared_documents.push(prepared);
       chunk_bytes += this._document_chunk_bytes(
@@ -522,10 +657,6 @@ export class Storage {
         chunk_date_count,
       );
       chunk_date_count += prepared.dates.length;
-      stored.push({
-        document,
-        reference: { chunk: chunk_name, id: String(document._id) },
-      });
     }
 
     await flush();
@@ -560,13 +691,22 @@ export class Storage {
     }
 
     const stored: StoredDocument[] = [];
+    const inserted_ids = new Set(documents.map(({ _id }) => String(_id)));
     const flush = async () => {
       if (!dirty) {
         return;
       }
+      const prepared_chunk = this._prepare_serialized_chunk(prepared_documents);
       await this._atomic_write(
         path.join(chunks_path, chunk_name),
-        this._prepare_serialized_chunk(prepared_documents).serialized,
+        prepared_chunk.serialized,
+      );
+      stored.push(
+        ...this._stored_documents_for_chunk(
+          chunk_name,
+          chunk,
+          prepared_chunk,
+        ).filter(({ reference }) => inserted_ids.has(reference.id)),
       );
       dirty = false;
     };
@@ -601,10 +741,6 @@ export class Storage {
       );
       chunk_date_count += prepared.dates.length;
       dirty = true;
-      stored.push({
-        document,
-        reference: { chunk: chunk_name, id: String(document._id) },
-      });
     }
 
     await flush();
@@ -614,8 +750,8 @@ export class Storage {
   private async _find_with_index(
     collection_name: string,
     metadata: CollectionMetadata,
-    field: string,
-    value: any,
+    query: MongifyQuery,
+    index_name: string,
     limit?: number,
     first = false,
     projection?: Record<string, 0 | 1 | boolean>,
@@ -624,26 +760,19 @@ export class Storage {
     const references = await this._index_references(
       collection_name,
       metadata,
-      field,
-      value,
+      index_name,
+      query,
     );
-    const chunk_cache = new Map<string, MongifyDocument[]>();
     const response: MongifyDocument[] = [];
     let matched = 0;
 
     for (const reference of references) {
-      let chunk = chunk_cache.get(reference.chunk);
-      if (!chunk) {
-        chunk = await this._read_chunk(collection_name, metadata, reference.chunk);
-        chunk_cache.set(reference.chunk, chunk);
-      }
-
-      const document = chunk.find(
-        (candidate) =>
-          candidate._id === reference.id &&
-          this._values_equal(candidate[field], value),
+      const document = await this._read_indexed_document(
+        collection_name,
+        metadata,
+        reference,
       );
-      if (document) {
+      if (document && matchesQuery(document, query)) {
         if (matched < skip) {
           matched += 1;
           continue;
@@ -658,6 +787,43 @@ export class Storage {
     return response;
   }
 
+  private async _find_with_range_index(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    query: MongifyQuery,
+    range: SimpleRangeQuery,
+    index_name: string,
+    limit?: number,
+    first = false,
+    projection?: Record<string, 0 | 1 | boolean>,
+    skip = 0,
+  ): Promise<MongifyDocument[]> {
+    const references = await this._range_index_references(
+      collection_name,
+      metadata,
+      range,
+      index_name,
+    );
+    const response: MongifyDocument[] = [];
+    let matched = 0;
+
+    for (const reference of references) {
+      const document = await this._read_indexed_document(
+        collection_name,
+        metadata,
+        reference,
+      );
+      if (!document || !matchesQuery(document, query)) continue;
+      if (matched < skip) {
+        matched += 1;
+        continue;
+      }
+      response.push(projectDocument(document, projection));
+      if (first || (limit !== undefined && response.length >= limit)) break;
+    }
+    return response;
+  }
+
   private async _find_matching_chunks(
     collection_name: string,
     metadata: CollectionMetadata,
@@ -665,17 +831,13 @@ export class Storage {
   ): Promise<Map<string, MatchedChunk>> {
     const result = new Map<string, MatchedChunk>();
 
-    if (isSimpleEqualityQuery(query)) {
-      const field = Object.keys(query)[0];
-      const value = query[field];
-      if (!metadata.indexes[field]) {
-        return this._scan_matching_chunks(collection_name, metadata, query);
-      }
+    const equality_index = this._find_equality_index(metadata, query);
+    if (equality_index) {
       const references = await this._index_references(
         collection_name,
         metadata,
-        field,
-        value,
+        equality_index,
+        query,
       );
       const grouped = new Map<string, IndexReference[]>();
       for (const reference of references) {
@@ -695,7 +857,50 @@ export class Storage {
         documents.forEach((document, position) => {
           if (
             reference_ids.has(String(document._id)) &&
-            this._values_equal(document[field], value)
+            matchesQuery(document, query)
+          ) {
+            matches.push({
+              document,
+              position,
+              reference: { chunk: chunk_name, id: String(document._id) },
+            });
+          }
+        });
+        if (matches.length > 0) {
+          result.set(chunk_name, { name: chunk_name, documents, matches });
+        }
+      }
+      return result;
+    }
+
+    const range = getSimpleRangeQuery(query);
+    const range_index = range
+      ? this._find_single_field_index(metadata, range.field)
+      : undefined;
+    if (range && range_index) {
+      const references = await this._range_index_references(
+        collection_name,
+        metadata,
+        range,
+        range_index,
+      );
+      const grouped = new Map<string, Set<string>>();
+      for (const reference of references) {
+        const ids = grouped.get(reference.chunk) || new Set<string>();
+        ids.add(reference.id);
+        grouped.set(reference.chunk, ids);
+      }
+      for (const [chunk_name, reference_ids] of grouped) {
+        const documents = await this._read_chunk(
+          collection_name,
+          metadata,
+          chunk_name,
+        );
+        const matches: MatchedDocument[] = [];
+        documents.forEach((document, position) => {
+          if (
+            reference_ids.has(String(document._id)) &&
+            matchesQuery(document, query)
           ) {
             matches.push({
               document,
@@ -778,96 +983,154 @@ export class Storage {
   private async _load_index(
     collection_name: string,
     metadata: CollectionMetadata,
-    field: string,
+    index_name: string,
   ): Promise<BTreeIndex> {
-    const cache_key = this._cache_key(collection_name, field);
+    const cache_key = this._cache_key(collection_name, index_name);
     const cached = index_cache.get(cache_key);
-    if (cached?.generation === metadata.generation) {
+    if (
+      cached?.generation === metadata.generation &&
+      cached.revision === metadata.revision
+    ) {
       return cached.tree;
     }
 
     try {
-      const signatures = await this._chunk_signatures(collection_name, metadata);
-      const tree = await BTreeIndex.open(this._index_path(collection_name, field), {
-        field,
+      const tree = await BTreeIndex.open(this._index_path(collection_name, index_name), {
+        field: index_name,
         generation: metadata.generation,
-        unique: metadata.indexes[field].unique,
-        chunks: signatures,
+        unique: metadata.indexes[index_name].unique,
+        revision: metadata.revision,
       });
-      index_cache.set(cache_key, { generation: metadata.generation, tree });
+      index_cache.set(cache_key, {
+        generation: metadata.generation,
+        revision: metadata.revision,
+        tree,
+      });
       return tree;
     } catch {}
 
     const tree = await this._build_index_from_chunks(
       collection_name,
       metadata,
-      field,
-      metadata.indexes[field].unique,
+      index_name,
+      metadata.indexes[index_name],
     );
-    index_cache.set(cache_key, { generation: metadata.generation, tree });
+    index_cache.set(cache_key, {
+      generation: metadata.generation,
+      revision: metadata.revision,
+      tree,
+    });
     return tree;
   }
 
   private async _index_references(
     collection_name: string,
     metadata: CollectionMetadata,
-    field: string,
-    value: any,
+    index_name: string,
+    query: MongifyQuery,
   ): Promise<IndexReference[]> {
+    const definition = metadata.indexes[index_name];
+    const key = this._compound_index_key(definition.fields, query);
+    if (key === undefined) return [];
     try {
-      const tree = await this._load_index(collection_name, metadata, field);
-      return await tree.search(this._index_key(value));
+      const tree = await this._load_index(collection_name, metadata, index_name);
+      return await tree.search(key);
     } catch {
-      const directory = this._index_path(collection_name, field);
-      index_cache.delete(this._cache_key(collection_name, field));
+      const directory = this._index_path(collection_name, index_name);
+      index_cache.delete(this._cache_key(collection_name, index_name));
       BTreeIndex.clearCache(directory);
       const tree = await this._build_index_from_chunks(
         collection_name,
         metadata,
-        field,
-        metadata.indexes[field].unique,
+        index_name,
+        definition,
       );
-      index_cache.set(this._cache_key(collection_name, field), {
+      index_cache.set(this._cache_key(collection_name, index_name), {
         generation: metadata.generation,
+        revision: metadata.revision,
         tree,
       });
-      return tree.search(this._index_key(value));
+      return tree.search(key);
+    }
+  }
+
+  private async _range_index_references(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    range: SimpleRangeQuery,
+    index_name: string,
+  ): Promise<IndexReference[]> {
+    const bounds = {
+      lower:
+        range.lower === undefined
+          ? undefined
+          : this._index_key(range.lower.value),
+      lowerInclusive: range.lower?.inclusive,
+      upper:
+        range.upper === undefined
+          ? undefined
+          : this._index_key(range.upper.value),
+      upperInclusive: range.upper?.inclusive,
+    };
+    try {
+      const tree = await this._load_index(
+        collection_name,
+        metadata,
+        index_name,
+      );
+      return await tree.range(bounds);
+    } catch {
+      const directory = this._index_path(collection_name, index_name);
+      index_cache.delete(this._cache_key(collection_name, index_name));
+      BTreeIndex.clearCache(directory);
+      const tree = await this._build_index_from_chunks(
+        collection_name,
+        metadata,
+        index_name,
+        metadata.indexes[index_name],
+      );
+      index_cache.set(this._cache_key(collection_name, index_name), {
+        generation: metadata.generation,
+        revision: metadata.revision,
+        tree,
+      });
+      return tree.range(bounds);
     }
   }
 
   private async _build_index_from_chunks(
     collection_name: string,
     metadata: CollectionMetadata,
-    field: string,
-    unique: boolean,
+    index_name: string,
+    definition: IndexDefinition,
   ): Promise<BTreeIndex> {
     const entries = new Map<string, IndexReference[]>();
 
     for (const chunk_name of await this._list_chunks(collection_name, metadata)) {
-      const documents = await this._read_chunk(
+      const stored_documents = await this._read_stored_chunk(
         collection_name,
         metadata,
         chunk_name,
       );
-      for (const document of documents) {
-        if (!Object.prototype.hasOwnProperty.call(document, field)) {
-          continue;
-        }
-        const key = this._index_key(document[field]);
+      for (const { document, reference } of stored_documents) {
+        const key = this._compound_index_key(definition.fields, document);
+        if (key === undefined) continue;
         const references = entries.get(key) || [];
-        references.push({ chunk: chunk_name, id: String(document._id) });
-        if (unique && references.length > 1) {
-          throw new Error(`Duplicate value for unique index: ${field}`);
+        references.push(reference);
+        if (definition.unique && references.length > 1) {
+          throw new Error(
+            `Duplicate value for unique index: ${definition.fields.join(", ")}`,
+          );
         }
         entries.set(key, references);
       }
     }
 
-    return BTreeIndex.build(this._index_path(collection_name, field), {
-      field,
+    return BTreeIndex.build(this._index_path(collection_name, index_name), {
+      field: index_name,
       generation: metadata.generation,
-      unique,
-      chunks: await this._chunk_signatures(collection_name, metadata),
+      unique: definition.unique,
+      revision: metadata.revision,
       entries,
     });
   }
@@ -877,16 +1140,17 @@ export class Storage {
     metadata: CollectionMetadata,
   ): Promise<Map<string, BTreeIndex>> {
     const indexes = new Map<string, BTreeIndex>();
-    for (const field of Object.keys(metadata.indexes)) {
+    for (const index_name of Object.keys(metadata.indexes)) {
       indexes.set(
-        field,
-        await this._load_index(collection_name, metadata, field),
+        index_name,
+        await this._load_index(collection_name, metadata, index_name),
       );
     }
     return indexes;
   }
 
   private _validate_unique_replacements(
+    metadata: CollectionMetadata,
     indexes: Map<string, BTreeIndex>,
     previous: StoredDocument[],
     replacements: StoredDocument[],
@@ -896,20 +1160,24 @@ export class Storage {
     );
 
     return (async () => {
-      for (const [field, tree] of indexes) {
+      for (const [index_name, tree] of indexes) {
         if (!tree.unique) continue;
+        const definition = metadata.indexes[index_name];
         const pending = new Set<string>();
         for (const replacement of replacements) {
-          if (!Object.prototype.hasOwnProperty.call(replacement.document, field)) {
-            continue;
-          }
-          const key = this._index_key(replacement.document[field]);
+          const key = this._compound_index_key(
+            definition.fields,
+            replacement.document,
+          );
+          if (key === undefined) continue;
           const existing = await tree.search(key);
           const has_unaffected = existing.some(
             (reference) => !affected.has(`${reference.chunk}\0${reference.id}`),
           );
           if (has_unaffected || pending.has(key)) {
-            throw new Error(`Duplicate value for unique index: ${field}`);
+            throw new Error(
+              `Duplicate value for unique index: ${definition.fields.join(", ")}`,
+            );
           }
           pending.add(key);
         }
@@ -924,18 +1192,22 @@ export class Storage {
     previous: StoredDocument[],
     replacements: StoredDocument[],
   ): Promise<void> {
-    const signatures = await this._chunk_signatures(collection_name, metadata);
-    for (const [field, tree] of indexes) {
+    const next_revision = metadata.revision + 1;
+    for (const [index_name, tree] of indexes) {
+      const definition = metadata.indexes[index_name];
       await tree.replaceReferences(
-        this._tree_entries(field, previous),
-        this._tree_entries(field, replacements),
-        signatures,
+        this._tree_entries(definition.fields, previous),
+        this._tree_entries(definition.fields, replacements),
+        next_revision,
       );
-      index_cache.set(this._cache_key(collection_name, field), {
+      index_cache.set(this._cache_key(collection_name, index_name), {
         generation: metadata.generation,
+        revision: next_revision,
         tree,
       });
     }
+    metadata.revision = next_revision;
+    await this._write_metadata(collection_name, metadata);
   }
 
   private async _build_indexes(
@@ -944,21 +1216,23 @@ export class Storage {
     stored: StoredDocument[],
   ): Promise<Map<string, BTreeIndex>> {
     const indexes = new Map<string, BTreeIndex>();
-    const signatures = await this._chunk_signatures(collection_name, metadata);
-    for (const [field, definition] of Object.entries(metadata.indexes)) {
+    for (const [index_name, definition] of Object.entries(metadata.indexes)) {
       const entries = new Map<string, IndexReference[]>();
-      for (const { key, reference } of this._tree_entries(field, stored)) {
+      for (const { key, reference } of this._tree_entries(
+        definition.fields,
+        stored,
+      )) {
         const references = entries.get(key) || [];
         references.push(reference);
         entries.set(key, references);
       }
       indexes.set(
-        field,
-        await BTreeIndex.build(this._index_path(collection_name, field), {
-          field,
+        index_name,
+        await BTreeIndex.build(this._index_path(collection_name, index_name), {
+          field: index_name,
           generation: metadata.generation,
           unique: definition.unique,
-          chunks: signatures,
+          revision: metadata.revision,
           entries,
         }),
       );
@@ -971,19 +1245,19 @@ export class Storage {
     indexes: Map<string, BTreeIndex>,
     documents: MongifyDocument[],
   ): Promise<void> {
-    for (const [field, definition] of Object.entries(metadata.indexes)) {
+    for (const [index_name, definition] of Object.entries(metadata.indexes)) {
       if (!definition.unique) {
         continue;
       }
-      const tree = indexes.get(field)!;
+      const tree = indexes.get(index_name)!;
       const pending = new Set<string>();
       for (const document of documents) {
-        if (!Object.prototype.hasOwnProperty.call(document, field)) {
-          continue;
-        }
-        const key = this._index_key(document[field]);
+        const key = this._compound_index_key(definition.fields, document);
+        if (key === undefined) continue;
         if ((await tree.search(key)).length > 0 || pending.has(key)) {
-          throw new Error(`Duplicate value for unique index: ${field}`);
+          throw new Error(
+            `Duplicate value for unique index: ${definition.fields.join(", ")}`,
+          );
         }
         pending.add(key);
       }
@@ -991,17 +1265,15 @@ export class Storage {
   }
 
   private _tree_entries(
-    field: string,
+    fields: string[],
     stored: StoredDocument[],
   ): Array<{ key: string; reference: IndexReference }> {
-    return stored
-      .filter(({ document }) =>
-        Object.prototype.hasOwnProperty.call(document, field),
-      )
-      .map(({ document, reference }) => ({
-        key: this._index_key(document[field]),
-        reference,
-      }));
+    const entries: Array<{ key: string; reference: IndexReference }> = [];
+    for (const { document, reference } of stored) {
+      const key = this._compound_index_key(fields, document);
+      if (key !== undefined) entries.push({ key, reference });
+    }
+    return entries;
   }
 
   private async _read_stored_documents(
@@ -1010,15 +1282,100 @@ export class Storage {
   ): Promise<StoredDocument[]> {
     const stored: StoredDocument[] = [];
     for (const chunk_name of await this._list_chunks(collection_name, metadata)) {
-      const chunk = await this._read_chunk(collection_name, metadata, chunk_name);
-      for (const document of chunk) {
-        stored.push({
-          document,
-          reference: { chunk: chunk_name, id: String(document._id) },
-        });
-      }
+      stored.push(
+        ...(await this._read_stored_chunk(
+          collection_name,
+          metadata,
+          chunk_name,
+        )),
+      );
     }
     return stored;
+  }
+
+  private async _read_stored_chunk(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    chunk_name: string,
+  ): Promise<StoredDocument[]> {
+    const documents = await this._read_chunk(
+      collection_name,
+      metadata,
+      chunk_name,
+    );
+    return this._stored_documents_for_chunk(
+      chunk_name,
+      documents,
+      this._prepare_chunk(documents),
+    );
+  }
+
+  private _stored_documents_for_chunk(
+    chunk_name: string,
+    documents: MongifyDocument[],
+    prepared: PreparedChunk,
+  ): StoredDocument[] {
+    return documents.map((document, index) => ({
+      document,
+      reference: {
+        chunk: chunk_name,
+        id: String(document._id),
+        ...prepared.locations[index],
+      },
+    }));
+  }
+
+  private async _read_indexed_document(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    reference: IndexReference,
+  ): Promise<MongifyDocument> {
+    if (
+      !Number.isSafeInteger(reference.offset) ||
+      reference.offset! < 0 ||
+      !Number.isSafeInteger(reference.length) ||
+      reference.length! < 1 ||
+      !Array.isArray(reference.dates)
+    ) {
+      throw new Error("Invalid B+ tree document reference");
+    }
+    const chunk_path = path.join(
+      this._chunks_path(collection_name, metadata.generation),
+      reference.chunk,
+    );
+    const handle = await open(chunk_path, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(reference.length!);
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        reference.length!,
+        reference.offset!,
+      );
+      if (bytesRead !== reference.length) {
+        throw new Error("Incomplete B+ tree document reference");
+      }
+      const document = JSON.parse(buffer.toString("utf8"));
+      if (String(document?._id) !== reference.id) {
+        throw new Error("Stale B+ tree document reference");
+      }
+      for (const date of reference.dates) {
+        if (
+          !Array.isArray(date) ||
+          date.length !== 2 ||
+          !Array.isArray(date[0]) ||
+          !date[0].every((segment) => typeof segment === "string") ||
+          typeof date[1] !== "number" ||
+          !Number.isFinite(date[1])
+        ) {
+          throw new Error("Invalid date in B+ tree document reference");
+        }
+        this._restore_date([document], 0, date[0], date[1], reference.chunk);
+      }
+      return document;
+    } finally {
+      await handle.close();
+    }
   }
 
   private async _read_chunk(
@@ -1059,10 +1416,6 @@ export class Storage {
     return documents;
   }
 
-  private _serialize_chunk(documents: MongifyDocument[]): string {
-    return this._prepare_chunk(documents).serialized;
-  }
-
   private _prepare_chunk(documents: MongifyDocument[]): PreparedChunk {
     const prepared = documents.map((document) =>
       this._serialize_document(document),
@@ -1080,13 +1433,29 @@ export class Storage {
         value,
       ]),
     );
-    const serialized = `{"format":"${CHUNK_FORMAT}","documents":[${prepared
+    const prefix = `{"format":"${CHUNK_FORMAT}","documents":[`;
+    const serialized = `${prefix}${prepared
       .map(({ serialized: document }) => document)
       .join(",")}],"dates":${JSON.stringify(dates)}}`;
+    let offset = Buffer.byteLength(prefix);
+    const locations = prepared.map((document) => {
+      const length = Buffer.byteLength(document.serialized);
+      const location = {
+        offset,
+        length,
+        dates: document.dates.map(
+          ({ path: date_path, value }) =>
+            [[...date_path], value] as [string[], number],
+        ),
+      };
+      offset += length + 1;
+      return location;
+    });
     return {
       serialized,
       bytes: Buffer.byteLength(serialized),
       dateCount: dates.length,
+      locations,
     };
   }
 
@@ -1199,6 +1568,7 @@ export class Storage {
   }
 
   private async _atomic_write(file_path: string, data: string): Promise<void> {
+    await JournalTransaction.beforeWrite(file_path);
     await fs.ensureDir(path.dirname(file_path));
     const temporary_path = path.join(
       path.dirname(file_path),
@@ -1220,9 +1590,133 @@ export class Storage {
       if (!Number.isFinite(timestamp)) {
         throw new TypeError("Invalid Date values cannot be indexed");
       }
-      return `date:${timestamp}`;
+      return `4:date:${this._sortable_number(timestamp)}`;
     }
-    return `${typeof value}:${JSON.stringify(value)}`;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw new TypeError("Non-finite numbers cannot be indexed");
+      }
+      return `2:number:${this._sortable_number(value)}`;
+    }
+    if (typeof value === "string") return `3:string:${value}`;
+    if (typeof value === "boolean") return `1:boolean:${value ? 1 : 0}`;
+    if (value === null) return "0:null";
+    return `5:${typeof value}:${JSON.stringify(value)}`;
+  }
+
+  private _sortable_number(value: number): string {
+    const buffer = Buffer.allocUnsafe(8);
+    buffer.writeDoubleBE(Object.is(value, -0) ? 0 : value);
+    if ((buffer[0] & 0x80) !== 0) {
+      for (let index = 0; index < buffer.length; index += 1) {
+        buffer[index] = 0xff - buffer[index];
+      }
+    } else {
+      buffer[0] ^= 0x80;
+    }
+    return buffer.toString("hex");
+  }
+
+  private _compound_index_key(
+    fields: string[],
+    source: MongifyDocument,
+  ): string | undefined {
+    const keys: string[] = [];
+    for (const field of fields) {
+      if (!Object.prototype.hasOwnProperty.call(source, field)) return undefined;
+      keys.push(this._index_key(source[field]));
+    }
+    if (keys.length === 1) return keys[0];
+    return keys.map((key) => `${key.length}:${key}`).join("");
+  }
+
+  private _find_equality_index(
+    metadata: CollectionMetadata,
+    query?: MongifyQuery,
+  ): string | undefined {
+    const equality = getSimpleEqualityQuery(query);
+    if (!equality) return undefined;
+    return Object.entries(metadata.indexes)
+      .filter(([, definition]) =>
+        definition.fields.every((field) =>
+          Object.prototype.hasOwnProperty.call(equality, field),
+        ),
+      )
+      .sort(
+        ([, left], [, right]) => right.fields.length - left.fields.length,
+      )[0]?.[0];
+  }
+
+  private _find_single_field_index(
+    metadata: CollectionMetadata,
+    field: string,
+  ): string | undefined {
+    return Object.entries(metadata.indexes).find(
+      ([, definition]) =>
+        definition.fields.length === 1 && definition.fields[0] === field,
+    )?.[0];
+  }
+
+  private _validate_sort(sort: Record<string, 1 | -1>): void {
+    if (sort === null || Array.isArray(sort) || typeof sort !== "object") {
+      throw new TypeError("Sort must be an object");
+    }
+    for (const [field, direction] of Object.entries(sort)) {
+      this._validate_field(field);
+      if (direction !== 1 && direction !== -1) {
+        throw new TypeError(`Sort direction for ${field} must be 1 or -1`);
+      }
+    }
+  }
+
+  private _sort_documents(
+    documents: MongifyDocument[],
+    sort: Record<string, 1 | -1>,
+  ): MongifyDocument[] {
+    const fields = Object.entries(sort);
+    return documents
+      .map((document, position) => ({ document, position }))
+      .sort((left, right) => {
+        for (const [field, direction] of fields) {
+          const compared = this._compare_sort_values(
+            left.document[field],
+            right.document[field],
+          );
+          if (compared !== 0) return compared * direction;
+        }
+        return left.position - right.position;
+      })
+      .map(({ document }) => document);
+  }
+
+  private _compare_sort_values(left: any, right: any): number {
+    if (this._values_equal(left, right)) return 0;
+    const left_rank = this._sort_type_rank(left);
+    const right_rank = this._sort_type_rank(right);
+    if (left_rank !== right_rank) return left_rank - right_rank;
+    const normalized_left = left instanceof Date ? left.getTime() : left;
+    const normalized_right = right instanceof Date ? right.getTime() : right;
+    if (
+      typeof normalized_left === "number" ||
+      typeof normalized_left === "string" ||
+      typeof normalized_left === "boolean"
+    ) {
+      return normalized_left < normalized_right ? -1 : 1;
+    }
+    const serialized_left = JSON.stringify(normalized_left);
+    const serialized_right = JSON.stringify(normalized_right);
+    return serialized_left < serialized_right ? -1 : 1;
+  }
+
+  private _sort_type_rank(value: any): number {
+    if (value === undefined) return 0;
+    if (value === null) return 1;
+    if (typeof value === "number") return 2;
+    if (typeof value === "string") return 3;
+    if (typeof value === "boolean") return 4;
+    if (value instanceof Date) return 5;
+    if (Array.isArray(value)) return 6;
+    return 7;
   }
 
   private _values_equal(left: any, right: any): boolean {
@@ -1240,6 +1734,22 @@ export class Storage {
     if (typeof field !== "string" || field.trim() === "" || field.includes("\0")) {
       throw new TypeError("Index field must be a non-empty string");
     }
+  }
+
+  private _normalize_index_fields(field: IndexFields): string[] {
+    const fields = Array.isArray(field) ? [...field] : [field];
+    if (fields.length === 0) {
+      throw new TypeError("A compound index requires at least one field");
+    }
+    fields.forEach((entry) => this._validate_field(entry));
+    if (new Set(fields).size !== fields.length) {
+      throw new TypeError("A compound index cannot repeat fields");
+    }
+    return fields;
+  }
+
+  private _index_name(fields: string[]): string {
+    return fields.length === 1 ? fields[0] : JSON.stringify(fields);
   }
 
   private _chunk_name(number: number): string {

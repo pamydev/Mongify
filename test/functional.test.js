@@ -240,6 +240,51 @@ describe("Mongify functional API", () => {
     );
   });
 
+  test("sorts by one or multiple fields before skip, limit and projection", async () => {
+    const users = await database.createCollection("users");
+    await users.insertMany([
+      { name: "Pamela", team: "a", score: 10 },
+      { name: "Alice", team: "b", score: 30 },
+      { name: "Bob", team: "a", score: 20 },
+      { name: "Carol", team: "b", score: 15 },
+    ]);
+
+    assert.deepEqual(
+      (await users.find({}, { sort: { score: -1 } })).map(({ score }) => score),
+      [30, 20, 15, 10],
+    );
+    assert.deepEqual(
+      await users.find(
+        {},
+        {
+          sort: { team: 1, score: -1 },
+          skip: 1,
+          limit: 2,
+          projection: { name: 1, _id: 0 },
+        },
+      ),
+      [{ name: "Pamela" }, { name: "Alice" }],
+    );
+  });
+
+  test("sorts Date values and validates sort directions", async () => {
+    const events = await database.createCollection("events");
+    await events.insertMany([
+      { name: "later", date: new Date("2026-08-03T00:00:00Z") },
+      { name: "earlier", date: new Date("2026-08-01T00:00:00Z") },
+      { name: "middle", date: new Date("2026-08-02T00:00:00Z") },
+    ]);
+
+    assert.deepEqual(
+      (await events.find({}, { sort: { date: 1 } })).map(({ name }) => name),
+      ["earlier", "middle", "later"],
+    );
+    await assert.rejects(
+      () => events.find({}, { sort: { date: 0 } }),
+      /must be 1 or -1/,
+    );
+  });
+
   test("findOne returns null when no document matches", async () => {
     const users = await database.createCollection("users");
 
@@ -370,6 +415,72 @@ describe("Mongify functional API", () => {
     );
 
     assert.deepEqual(await users.find(), []);
+  });
+
+  test("creates and uses compound indexes", async () => {
+    const users = await database.createCollection("users");
+    const created = await users.createIndex(["tenant", "email"], {
+      unique: true,
+    });
+
+    assert.deepEqual(created, {
+      acknowledge: true,
+      indexesBefore: 1,
+      indexesAfter: 2,
+    });
+    assert.deepEqual(await users.createIndex(["tenant", "email"]), {
+      acknowledge: false,
+      indexesBefore: 2,
+      indexesAfter: 2,
+      error: "exists",
+    });
+    assert.deepEqual(await users.listIndexes(), [
+      { field: "_id", unique: true },
+      { field: ["tenant", "email"], unique: true },
+    ]);
+
+    await users.insertMany([
+      { tenant: "cedros", email: "pamela@example.com", name: "Pamela" },
+      { tenant: "other", email: "pamela@example.com", name: "Other Pamela" },
+    ]);
+    assert.equal(
+      (await users.findOne({ tenant: "cedros", email: "pamela@example.com" }))
+        .name,
+      "Pamela",
+    );
+    await assert.rejects(
+      () =>
+        users.insert({ tenant: "cedros", email: "pamela@example.com" }),
+      /Duplicate value for unique index: tenant, email/,
+    );
+
+    await users.update(
+      { tenant: "cedros", email: "pamela@example.com" },
+      { email: "new@example.com" },
+    );
+    assert.equal(
+      await users.findOne({ tenant: "cedros", email: "pamela@example.com" }),
+      null,
+    );
+    assert.equal(
+      (await users.findOne({ tenant: "cedros", email: "new@example.com" }))
+        .name,
+      "Pamela",
+    );
+
+    await users.dropIndex(["tenant", "email"]);
+    assert.deepEqual(await users.listIndexes(), [
+      { field: "_id", unique: true },
+    ]);
+  });
+
+  test("validates compound index field lists", async () => {
+    const users = await database.createCollection("users");
+    await assert.rejects(() => users.createIndex([]), /at least one field/);
+    await assert.rejects(
+      () => users.createIndex(["tenant", "tenant"]),
+      /cannot repeat fields/,
+    );
   });
 
   test("keeps indexes synchronized after updates and deletes", async () => {
