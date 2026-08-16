@@ -1,7 +1,8 @@
 {
   "name": "mongify",
-  "version": "1.0.0",
-  "description": "",
+  "displayName": "Cedros Mongify",
+  "version": "1.1.12",
+  "description": "A JSON object database that can be used to store and retrieve data in a structured way.",
   "main": "index.js",
   "scripts": {
     "start": "tsc --watch",
@@ -13,7 +14,11 @@
     "test:concurrency": "npm run build && node --test test/concurrency.test.js",
     "test:advanced": "npm run build && node --test test/advanced-stress.bench.js",
     "test:safety": "npm run build && node --test test/safety.test.js",
-    "test:stress": "npm run build && node --test test/stress.test.js"
+    "test:stress": "npm run build && node --test test/stress.test.js",
+    "publish:login": "npm login",
+    "publish:alpha": "npm publish --tag alpha",
+    "publish:beta": "npm publish --tag beta",
+    "publish:latest": "npm publish"
   },
   "repository": {
     "type": "git",
