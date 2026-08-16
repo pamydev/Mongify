@@ -38,6 +38,31 @@ describe("Mongify concurrency", () => {
     );
   });
 
+  test("persists a simultaneous insert burst as one batch", async () => {
+    const collection = await context.database.createCollection("events");
+    const helpers = context.database.helpers;
+    const originalWrite = helpers._purge_and_write_entire_file.bind(helpers);
+    let writes = 0;
+
+    helpers._purge_and_write_entire_file = async (...args) => {
+      writes += 1;
+      return originalWrite(...args);
+    };
+
+    try {
+      await Promise.all(
+        Array.from({ length: 100 }, (_, index) =>
+          collection.insert({ index }),
+        ),
+      );
+    } finally {
+      helpers._purge_and_write_entire_file = originalWrite;
+    }
+
+    assert.equal(writes, 1);
+    assert.equal((await collection.find()).length, 100);
+  });
+
   test("does not lose inserts made by two database instances", async () => {
     const firstDatabase = context.database;
     const secondDatabase = new Mongify({

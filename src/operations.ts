@@ -1,6 +1,18 @@
 import { v4 as uuid } from "uuid";
 import { Helpers } from "./helpers";
 
+interface PendingInsert {
+  document: MongifyDocument;
+  resolve: (value: boolean) => void;
+  reject: (reason?: unknown) => void;
+}
+
+interface InsertBatch {
+  pending: PendingInsert[];
+}
+
+const insert_batches = new Map<string, InsertBatch>();
+
 export class Operations {
   public helpers: Helpers;
 
@@ -28,22 +40,70 @@ export class Operations {
     });
   }
 
-  public async insert(
+  public insert(
     document: MongifyDocument,
     collection_name: string,
   ): Promise<boolean> {
-    return this.helpers._with_collection_lock(collection_name, async () => {
-      const file = await this.helpers._read_entire_json_file({
-        collection_name,
-        create_new: true,
-      });
-      const { _id: ignored_id, ...document_without_id } = document;
-      const new_document = { ...document_without_id, _id: uuid() };
+    const collection_path = this.helpers._get_collection_path(collection_name);
+    const { _id: ignored_id, ...document_without_id } = document;
 
-      file.push(new_document);
-      await this.helpers._purge_and_write_entire_file(collection_name, file);
-      return true;
+    return new Promise<boolean>((resolve, reject) => {
+      const pending_insert = {
+        document: document_without_id,
+        resolve,
+        reject,
+      };
+      const existing_batch = insert_batches.get(collection_path);
+
+      if (existing_batch) {
+        existing_batch.pending.push(pending_insert);
+        return;
+      }
+
+      const batch = { pending: [pending_insert] };
+      insert_batches.set(collection_path, batch);
+      this._schedule_insert_batch(collection_name, collection_path, batch);
     });
+  }
+
+  private _schedule_insert_batch(
+    collection_name: string,
+    collection_path: string,
+    batch: InsertBatch,
+  ): void {
+    void this.helpers
+      ._with_collection_lock(collection_name, async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        if (insert_batches.get(collection_path) === batch) {
+          insert_batches.delete(collection_path);
+        }
+
+        const pending = batch.pending.splice(0);
+
+        try {
+          const file = await this.helpers._read_entire_json_file({
+            collection_name,
+            create_new: true,
+          });
+
+          for (const entry of pending) {
+            file.push({ ...entry.document, _id: uuid() });
+          }
+
+          await this.helpers._purge_and_write_entire_file(collection_name, file);
+          pending.forEach(({ resolve }) => resolve(true));
+        } catch (error) {
+          pending.forEach(({ reject }) => reject(error));
+          throw error;
+        }
+      })
+      .catch((error) => {
+        if (insert_batches.get(collection_path) === batch) {
+          insert_batches.delete(collection_path);
+        }
+        batch.pending.splice(0).forEach(({ reject }) => reject(error));
+      });
   }
 
   public async insertMany(
