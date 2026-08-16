@@ -29,7 +29,20 @@ async function removeTestDatabase(context) {
   });
 }
 
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    throw new TypeError("Duration must be a non-negative finite number");
+  }
+
+  if (milliseconds >= 1_000) {
+    return `${(milliseconds / 1_000).toFixed(1)}s`;
+  }
+
+  return `${Math.round(milliseconds)}ms`;
+}
+
 module.exports = {
   createTestDatabase,
+  formatDuration,
   removeTestDatabase,
 };

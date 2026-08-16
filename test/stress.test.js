@@ -4,7 +4,11 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 
-const { createTestDatabase, removeTestDatabase } = require("./support.js");
+const {
+  createTestDatabase,
+  formatDuration,
+  removeTestDatabase,
+} = require("./support.js");
 
 describe("Mongify stress", () => {
   let context;
@@ -37,9 +41,9 @@ describe("Mongify stress", () => {
     testContext.diagnostic(
       JSON.stringify({
         documents: total,
-        insertMilliseconds: Math.round(insertedAt - startedAt),
-        readMilliseconds: Math.round(finishedAt - insertedAt),
-        totalMilliseconds: Math.round(finishedAt - startedAt),
+        insert: formatDuration(insertedAt - startedAt),
+        read: formatDuration(finishedAt - insertedAt),
+        total: formatDuration(finishedAt - startedAt),
       }),
     );
 
@@ -61,7 +65,7 @@ describe("Mongify stress", () => {
     const documents = await collection.find();
 
     console.log(
-      `Inserted ${total.toLocaleString("en-US")} documents with simultaneous insert() calls in ${Math.round(elapsedMilliseconds)} ms (${(elapsedMilliseconds / 1_000).toFixed(2)} s)`,
+      `Inserted ${total.toLocaleString("en-US")} documents with simultaneous insert() calls in ${formatDuration(elapsedMilliseconds)}`,
     );
 
     assert.equal(documents.length, total);
@@ -93,19 +97,34 @@ describe("Mongify stress", () => {
     const elapsed = performance.now() - startedAt;
 
     testContext.diagnostic(
-      `${queryCount} queries completed in ${Math.round(elapsed)} ms`,
+      `${queryCount} queries completed in ${formatDuration(elapsed)}`,
     );
   });
 
-  test("findOne searches a file with 100,000 documents", async () => {
+  const total = 120_000;
+  const totalDummyFields = 50;
+  test(`findOne searches a file with ${total.toLocaleString("en-US")} documents`, async () => {
     const collection = await context.database.createCollection("documents");
-    const total = 1_000_000;
+
     const targetIndex = total - 1;
+
+    const createDummyFields = (count) => {
+      return Array.from({ length: count }, (_, index) => ({
+        key: `dummyField${index}`,
+        value: `dummyValue${index + "x".repeat(50)}`,
+      }));
+    };
 
     await collection.insertMany(
       Array.from({ length: total }, (_, index) => ({
         index,
         name: `document-${index}`,
+        ...Object.fromEntries(
+          createDummyFields(totalDummyFields).map(({ key, value }) => [
+            key,
+            value,
+          ]),
+        ),
       })),
     );
 
@@ -121,7 +140,7 @@ describe("Mongify stress", () => {
     const elapsedMilliseconds = performance.now() - startedAt;
 
     console.log(
-      `findOne() found the last of ${total.toLocaleString("en-US")} documents in ${elapsedMilliseconds.toFixed(2)} ms (JSON file: ${(size / 1024 / 1024).toFixed(2)} MB)`,
+      `findOne() found the last of ${total.toLocaleString("en-US")} documents in ${formatDuration(elapsedMilliseconds)} (JSON file: ${(size / 1024 / 1024).toFixed(2)} MB)`,
     );
 
     assert.equal(document.index, targetIndex);
