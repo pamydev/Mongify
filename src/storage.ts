@@ -48,6 +48,27 @@ interface MatchedChunk {
   matches: MatchedDocument[];
 }
 
+interface SerializedDate {
+  path: string[];
+  value: number;
+}
+
+interface PreparedDocument {
+  serialized: string;
+  dates: SerializedDate[];
+}
+
+interface PreparedChunk {
+  serialized: string;
+  bytes: number;
+  dateCount: number;
+}
+
+const CHUNK_FORMAT = "mongify-chunk-v1";
+const EMPTY_CHUNK_BYTES = Buffer.byteLength(
+  `{"format":"${CHUNK_FORMAT}","documents":[],"dates":[]}`,
+);
+
 const index_cache = new Map<string, CachedIndex>();
 
 export class Storage {
@@ -254,7 +275,7 @@ export class Storage {
           this._chunks_path(collection_name, metadata.generation),
           chunk.name,
         ),
-        JSON.stringify(chunk.documents),
+        this._serialize_chunk(chunk.documents),
       );
     }
 
@@ -297,7 +318,7 @@ export class Storage {
           this._chunks_path(collection_name, metadata.generation),
           chunk.name,
         ),
-        JSON.stringify(remaining),
+        this._serialize_chunk(remaining),
       );
     }
 
@@ -450,7 +471,9 @@ export class Storage {
 
     const stored: StoredDocument[] = [];
     let chunk: MongifyDocument[] = [];
-    let chunk_bytes = 2;
+    let prepared_documents: PreparedDocument[] = [];
+    let chunk_bytes = EMPTY_CHUNK_BYTES;
+    let chunk_date_count = 0;
     let chunk_number = 1;
 
     const flush = async () => {
@@ -458,27 +481,41 @@ export class Storage {
         return;
       }
       const name = this._chunk_name(chunk_number);
-      await this._atomic_write(path.join(chunks_path, name), JSON.stringify(chunk));
+      await this._atomic_write(
+        path.join(chunks_path, name),
+        this._prepare_serialized_chunk(prepared_documents).serialized,
+      );
       chunk = [];
-      chunk_bytes = 2;
+      prepared_documents = [];
+      chunk_bytes = EMPTY_CHUNK_BYTES;
+      chunk_date_count = 0;
       chunk_number += 1;
     };
 
     for (const document of documents) {
-      const serialized = JSON.stringify(document);
-      const document_bytes = Buffer.byteLength(serialized);
-      const separator_bytes = chunk.length === 0 ? 0 : 1;
+      const prepared = this._serialize_document(document);
+      const additional_bytes = this._document_chunk_bytes(
+        prepared,
+        chunk.length,
+        chunk_date_count,
+      );
 
       if (
         chunk.length > 0 &&
-        chunk_bytes + separator_bytes + document_bytes > CHUNK_SIZE_BYTES
+        chunk_bytes + additional_bytes > CHUNK_SIZE_BYTES
       ) {
         await flush();
       }
 
       const chunk_name = this._chunk_name(chunk_number);
       chunk.push(document);
-      chunk_bytes += (chunk.length === 1 ? 0 : 1) + document_bytes;
+      prepared_documents.push(prepared);
+      chunk_bytes += this._document_chunk_bytes(
+        prepared,
+        chunk.length - 1,
+        chunk_date_count,
+      );
+      chunk_date_count += prepared.dates.length;
       stored.push({
         document,
         reference: { chunk: chunk_name, id: String(document._id) },
@@ -500,14 +537,20 @@ export class Storage {
     let chunk_number = chunk_names.length || 1;
     let chunk_name = this._chunk_name(chunk_number);
     let chunk: MongifyDocument[] = [];
-    let chunk_bytes = 2;
+    let prepared_documents: PreparedDocument[] = [];
+    let chunk_bytes = EMPTY_CHUNK_BYTES;
+    let chunk_date_count = 0;
     let dirty = false;
 
     if (chunk_names.length > 0) {
       chunk_name = chunk_names.at(-1)!;
-      const serialized = await fs.readFile(path.join(chunks_path, chunk_name), "utf8");
-      chunk = JSON.parse(serialized);
-      chunk_bytes = Buffer.byteLength(serialized);
+      chunk = await this._read_chunk(collection_name, metadata, chunk_name);
+      prepared_documents = chunk.map((document) =>
+        this._serialize_document(document),
+      );
+      const prepared = this._prepare_serialized_chunk(prepared_documents);
+      chunk_bytes = prepared.bytes;
+      chunk_date_count = prepared.dateCount;
     }
 
     const stored: StoredDocument[] = [];
@@ -517,29 +560,40 @@ export class Storage {
       }
       await this._atomic_write(
         path.join(chunks_path, chunk_name),
-        JSON.stringify(chunk),
+        this._prepare_serialized_chunk(prepared_documents).serialized,
       );
       dirty = false;
     };
 
     for (const document of documents) {
-      const serialized = JSON.stringify(document);
-      const document_bytes = Buffer.byteLength(serialized);
-      const separator_bytes = chunk.length === 0 ? 0 : 1;
+      const prepared = this._serialize_document(document);
+      const additional_bytes = this._document_chunk_bytes(
+        prepared,
+        chunk.length,
+        chunk_date_count,
+      );
 
       if (
         chunk.length > 0 &&
-        chunk_bytes + separator_bytes + document_bytes > CHUNK_SIZE_BYTES
+        chunk_bytes + additional_bytes > CHUNK_SIZE_BYTES
       ) {
         await flush();
         chunk_number += 1;
         chunk_name = this._chunk_name(chunk_number);
         chunk = [];
-        chunk_bytes = 2;
+        prepared_documents = [];
+        chunk_bytes = EMPTY_CHUNK_BYTES;
+        chunk_date_count = 0;
       }
 
       chunk.push(document);
-      chunk_bytes += (chunk.length === 1 ? 0 : 1) + document_bytes;
+      prepared_documents.push(prepared);
+      chunk_bytes += this._document_chunk_bytes(
+        prepared,
+        chunk.length - 1,
+        chunk_date_count,
+      );
+      chunk_date_count += prepared.dates.length;
       dirty = true;
       stored.push({
         document,
@@ -577,7 +631,8 @@ export class Storage {
 
       const document = chunk.find(
         (candidate) =>
-          candidate._id === reference.id && candidate[field] === value,
+          candidate._id === reference.id &&
+          this._values_equal(candidate[field], value),
       );
       if (document) {
         response.push(document);
@@ -624,7 +679,7 @@ export class Storage {
         documents.forEach((document, position) => {
           if (
             reference_ids.has(String(document._id)) &&
-            document[field] === value
+            this._values_equal(document[field], value)
           ) {
             matches.push({
               document,
@@ -648,7 +703,7 @@ export class Storage {
       );
       const matches: MatchedDocument[] = [];
       documents.forEach((document, position) => {
-        if (document[field] === value) {
+        if (this._values_equal(document[field], value)) {
           matches.push({
             document,
             position,
@@ -676,7 +731,7 @@ export class Storage {
     for (const chunk_name of chunk_names) {
       const chunk = await this._read_chunk(collection_name, metadata, chunk_name);
       for (const document of chunk) {
-        if (!query || document[query.field] === query.value) {
+        if (!query || this._values_equal(document[query.field], query.value)) {
           response.push(document);
           if (first || (limit !== undefined && response.length >= limit)) {
             return response;
@@ -943,11 +998,144 @@ export class Storage {
       path.join(this._chunks_path(collection_name, metadata.generation), chunk_name),
       "utf8",
     );
-    const chunk = JSON.parse(serialized);
-    if (!Array.isArray(chunk)) {
+    const persisted = JSON.parse(serialized);
+    if (
+      persisted?.format !== CHUNK_FORMAT ||
+      !Array.isArray(persisted.documents) ||
+      !Array.isArray(persisted.dates)
+    ) {
       throw new Error(`Invalid chunk format: ${chunk_name}`);
     }
-    return chunk;
+
+    const documents: MongifyDocument[] = persisted.documents;
+    for (const entry of persisted.dates) {
+      if (
+        !Array.isArray(entry) ||
+        entry.length !== 3 ||
+        !Number.isInteger(entry[0]) ||
+        !Array.isArray(entry[1]) ||
+        !entry[1].every((segment: unknown) => typeof segment === "string") ||
+        typeof entry[2] !== "number" ||
+        !Number.isFinite(entry[2]) ||
+        entry[0] < 0 ||
+        entry[0] >= documents.length
+      ) {
+        throw new Error(`Invalid date metadata in chunk: ${chunk_name}`);
+      }
+      this._restore_date(documents, entry[0], entry[1], entry[2], chunk_name);
+    }
+    return documents;
+  }
+
+  private _serialize_chunk(documents: MongifyDocument[]): string {
+    return this._prepare_chunk(documents).serialized;
+  }
+
+  private _prepare_chunk(documents: MongifyDocument[]): PreparedChunk {
+    const prepared = documents.map((document) =>
+      this._serialize_document(document),
+    );
+    return this._prepare_serialized_chunk(prepared);
+  }
+
+  private _prepare_serialized_chunk(
+    prepared: PreparedDocument[],
+  ): PreparedChunk {
+    const dates = prepared.flatMap(({ dates }, document_index) =>
+      dates.map(({ path: date_path, value }) => [
+        document_index,
+        date_path,
+        value,
+      ]),
+    );
+    const serialized = `{"format":"${CHUNK_FORMAT}","documents":[${prepared
+      .map(({ serialized: document }) => document)
+      .join(",")}],"dates":${JSON.stringify(dates)}}`;
+    return {
+      serialized,
+      bytes: Buffer.byteLength(serialized),
+      dateCount: dates.length,
+    };
+  }
+
+  private _serialize_document(document: MongifyDocument): PreparedDocument {
+    const dates: SerializedDate[] = [];
+    const paths = new WeakMap<object, string[]>();
+    paths.set(document, []);
+
+    const serialized = JSON.stringify(document, function (key, value) {
+      const original = key === "" ? document : this[key];
+      const parent_path = key === "" ? [] : paths.get(this) || [];
+      const current_path = key === "" ? [] : [...parent_path, key];
+
+      if (original instanceof Date) {
+        const timestamp = original.getTime();
+        if (!Number.isFinite(timestamp)) {
+          throw new TypeError("Invalid Date values cannot be stored");
+        }
+        dates.push({ path: current_path, value: timestamp });
+        return timestamp;
+      }
+      if (original && typeof original === "object") {
+        paths.set(original, current_path);
+      }
+      return value;
+    });
+
+    if (serialized === undefined) {
+      throw new TypeError("Document cannot be serialized as JSON");
+    }
+    return { serialized, dates };
+  }
+
+  private _document_chunk_bytes(
+    prepared: PreparedDocument,
+    document_index: number,
+    existing_date_count: number,
+  ): number {
+    let bytes = Buffer.byteLength(prepared.serialized);
+    if (document_index > 0) {
+      bytes += 1;
+    }
+    prepared.dates.forEach(({ path: date_path, value }, date_index) => {
+      if (existing_date_count + date_index > 0) {
+        bytes += 1;
+      }
+      bytes += Buffer.byteLength(
+        JSON.stringify([document_index, date_path, value]),
+      );
+    });
+    return bytes;
+  }
+
+  private _restore_date(
+    documents: MongifyDocument[],
+    document_index: number,
+    date_path: string[],
+    timestamp: number,
+    chunk_name: string,
+  ): void {
+    if (date_path.length === 0) {
+      documents[document_index] = new Date(timestamp) as any;
+      return;
+    }
+
+    let target: any = documents[document_index];
+    for (const segment of date_path.slice(0, -1)) {
+      if (target === null || typeof target !== "object" || !(segment in target)) {
+        throw new Error(`Invalid date path in chunk: ${chunk_name}`);
+      }
+      target = target[segment];
+    }
+    if (target === null || typeof target !== "object") {
+      throw new Error(`Invalid date path in chunk: ${chunk_name}`);
+    }
+    Object.defineProperty(target, date_path.at(-1)!, {
+      value: new Date(timestamp),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
 
   private async _list_chunks(
@@ -995,7 +1183,25 @@ export class Storage {
   }
 
   private _index_key(value: any): string {
+    if (value instanceof Date) {
+      const timestamp = value.getTime();
+      if (!Number.isFinite(timestamp)) {
+        throw new TypeError("Invalid Date values cannot be indexed");
+      }
+      return `date:${timestamp}`;
+    }
     return `${typeof value}:${JSON.stringify(value)}`;
+  }
+
+  private _values_equal(left: any, right: any): boolean {
+    if (left instanceof Date || right instanceof Date) {
+      return (
+        left instanceof Date &&
+        right instanceof Date &&
+        left.getTime() === right.getTime()
+      );
+    }
+    return left === right;
   }
 
   private _validate_field(field: unknown): asserts field is string {

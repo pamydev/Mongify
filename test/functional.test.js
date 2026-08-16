@@ -2,6 +2,7 @@ const { afterEach, beforeEach, describe, test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { Mongify } = require("../dist/mongify.js");
 
 const {
   createTestDatabase,
@@ -67,6 +68,104 @@ describe("Mongify functional API", () => {
 
     assert.equal(documents.length, 3);
     assert.equal(new Set(documents.map(({ _id }) => _id)).size, 3);
+  });
+
+  test("preserves Date values when storing and reading documents", async () => {
+    const users = await database.createCollection("users");
+    const date = new Date("2026-08-16T20:06:59.174Z");
+
+    await users.insert({ name: "Pamela", date });
+
+    const document = await users.findOne({ name: "Pamela" });
+    assert.ok(document.date instanceof Date);
+    assert.equal(document.date.getTime(), date.getTime());
+
+    const manifestPath = path.join(
+      context.temporaryDirectory,
+      "Mongify",
+      "test-database",
+      "users.json",
+    );
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    const chunkPath = path.join(
+      path.dirname(manifestPath),
+      ".mongify",
+      Buffer.from("users").toString("base64url"),
+      "generations",
+      manifest.generation,
+      "chunks",
+      "000001.json",
+    );
+    const persisted = JSON.parse(await fs.readFile(chunkPath, "utf8"));
+
+    assert.equal(persisted.format, "mongify-chunk-v1");
+    assert.equal(persisted.documents[0].date, date.getTime());
+    assert.deepEqual(persisted.dates, [[0, ["date"], date.getTime()]]);
+  });
+
+  test("preserves nested Date values and Date values inside arrays", async () => {
+    const users = await database.createCollection("users");
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const loginAt = new Date("2026-08-16T21:00:00.000Z");
+
+    await users.insert({
+      name: "Pamela",
+      profile: { createdAt },
+      logins: [loginAt],
+    });
+
+    const document = await users.findOne({ name: "Pamela" });
+    assert.ok(document.profile.createdAt instanceof Date);
+    assert.ok(document.logins[0] instanceof Date);
+    assert.equal(document.profile.createdAt.getTime(), createdAt.getTime());
+    assert.equal(document.logins[0].getTime(), loginAt.getTime());
+  });
+
+  test("finds indexed Date values after reopening the database", async () => {
+    const users = await database.createCollection("users");
+    const date = new Date("2026-08-16T20:06:59.174Z");
+    await users.createIndex("date", { unique: true });
+    await users.insert({ name: "Pamela", date });
+
+    const reopened = new Mongify({
+      database_name: "test-database",
+      path: context.temporaryDirectory,
+    });
+    const document = await reopened.getCollection("users").findOne({
+      date: new Date(date.getTime()),
+    });
+
+    assert.equal(document.name, "Pamela");
+    assert.ok(document.date instanceof Date);
+    assert.equal(document.date.getTime(), date.getTime());
+  });
+
+  test("keeps Date indexes synchronized after updates and deletes", async () => {
+    const users = await database.createCollection("users");
+    const previous = new Date("2026-01-01T00:00:00.000Z");
+    const replacement = new Date("2026-08-16T20:06:59.174Z");
+    await users.createIndex("date", { unique: true });
+    await users.insert({ name: "Pamela", date: previous });
+
+    await users.update({ date: previous }, { date: replacement });
+
+    assert.equal(await users.findOne({ date: previous }), null);
+    const updated = await users.findOne({ date: replacement });
+    assert.ok(updated.date instanceof Date);
+    assert.equal(updated.date.getTime(), replacement.getTime());
+
+    await users.delete({ date: replacement });
+    assert.equal(await users.findOne({ date: replacement }), null);
+  });
+
+  test("rejects invalid Date values", async () => {
+    const users = await database.createCollection("users");
+
+    await assert.rejects(
+      () => users.insert({ date: new Date("invalid") }),
+      /Invalid Date values cannot be stored/,
+    );
+    assert.deepEqual(await users.find(), []);
   });
 
   test("finds documents and applies a limit", async () => {

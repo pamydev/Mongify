@@ -49,15 +49,30 @@ const createDummyDocument = async (
 (async () => {
   const startedAt = performance.now();
   console.log("starting...");
-  let index = await database.getCollection("users").createIndex("index");
-  console.log(index);
+  // let index = await database.getCollection("users").createIndex("index");
+  // console.log(index);
   let res = await database.getCollection("users").findOne({
-    index: "test1",
+    address: {
+      city: "Anytown",
+    },
   });
-  // await database.getCollection("users").insert({
-  //   index: "test1",
-  //   name: "Pamela Sedrez",
+  // let res = await database.getCollection("users").insert({
+  //   index: "test3",
+  //   name: "Pamela Sedrez 3",
+  //   date: new Date(),
+  //   purchaseList: ["item1", "item2", "item3"],
+  //   address: {
+  //     street: "123 Main St",
+  //     city: "Anytown",
+  //     state: "CA",
+  //     zip: "12345",
+  //   },
   // });
   const elapsedMilliseconds = performance.now() - startedAt;
-  console.log(res, formatDuration(elapsedMilliseconds));
+  console.log(
+    res,
+    typeof res.date,
+    res.date.getTime(),
+    formatDuration(elapsedMilliseconds),
+  );
 })();

@@ -148,6 +148,24 @@ const matchingUsers = await users.find({ active: true }, { limit: "10" });
 `find` returns an array. `findOne` returns the first matching document, or `null`
 when no document matches.
 
+## Date values
+
+Mongify preserves JavaScript `Date` values, including dates nested inside objects
+and arrays:
+
+```ts
+const createdAt = new Date();
+await users.insert({ name: "Pamela", createdAt });
+
+const user = await users.findOne({ createdAt });
+console.log(user?.createdAt instanceof Date); // true
+console.log(user?.createdAt.getTime());
+```
+
+Dates are stored internally as millisecond timestamps with separate type metadata,
+then restored as `Date` instances when a chunk is read. Date indexes also use the
+timestamp as their key. Invalid dates are rejected.
+
 ## Indexes
 
 Every collection has a unique `_id` index automatically. Create indexes for fields
