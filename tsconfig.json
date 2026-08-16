@@ -5,7 +5,14 @@
     "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
     "forceConsistentCasingInFileNames": true,
-    "types": ["Node"]
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "noEmit": false,
+    "incremental": true,
+    "declaration": true,
+    "types": ["node"]
   }
 }

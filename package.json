@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "tsc",
+    "build-types": "tsc --emitDeclarationOnly"
   },
   "repository": {
     "type": "git",
@@ -18,6 +19,7 @@
   },
   "homepage": "https://github.com/pamydev/Mongify#readme",
   "dependencies": {
+    "fs-extra": "^11.4.0",
     "uuid": "^14.0.1"
   },
   "devDependencies": {
