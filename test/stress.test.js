@@ -1,11 +1,10 @@
 const { afterEach, beforeEach, describe, test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 
-const {
-  createTestDatabase,
-  removeTestDatabase,
-} = require("./support.js");
+const { createTestDatabase, removeTestDatabase } = require("./support.js");
 
 describe("Mongify stress", () => {
   let context;
@@ -55,9 +54,7 @@ describe("Mongify stress", () => {
     const startedAt = performance.now();
 
     await Promise.all(
-      Array.from({ length: total }, (_, index) =>
-        collection.insert({ index }),
-      ),
+      Array.from({ length: total }, (_, index) => collection.insert({ index })),
     );
 
     const elapsedMilliseconds = performance.now() - startedAt;
@@ -98,5 +95,36 @@ describe("Mongify stress", () => {
     testContext.diagnostic(
       `${queryCount} queries completed in ${Math.round(elapsed)} ms`,
     );
+  });
+
+  test("findOne searches a file with 100,000 documents", async () => {
+    const collection = await context.database.createCollection("documents");
+    const total = 1_000_000;
+    const targetIndex = total - 1;
+
+    await collection.insertMany(
+      Array.from({ length: total }, (_, index) => ({
+        index,
+        name: `document-${index}`,
+      })),
+    );
+
+    const collectionPath = path.join(
+      context.temporaryDirectory,
+      "Mongify",
+      "stress",
+      "documents.json",
+    );
+    const { size } = await fs.stat(collectionPath);
+    const startedAt = performance.now();
+    const document = await collection.findOne({ index: targetIndex });
+    const elapsedMilliseconds = performance.now() - startedAt;
+
+    console.log(
+      `findOne() found the last of ${total.toLocaleString("en-US")} documents in ${elapsedMilliseconds.toFixed(2)} ms (JSON file: ${(size / 1024 / 1024).toFixed(2)} MB)`,
+    );
+
+    assert.equal(document.index, targetIndex);
+    assert.equal(document.name, `document-${targetIndex}`);
   });
 });
