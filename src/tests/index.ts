@@ -12,11 +12,15 @@ const createCollections = async () => {
 
 const insertSells = async () => {
   const sellsCollection = database.getCollection("sells");
-  await sellsCollection.insertMany([
+  sellsCollection.insertMany([
     { item: "Laptop", price: 1200, quantity: 5 },
     { item: "Phone", price: 800, quantity: 10 },
     { item: "Tablet", price: 600, quantity: 7 },
   ]);
+  sellsCollection.insert({ item: "Monitor", price: 300, quantity: 15 });
+  sellsCollection.insert({ item: "PC", price: 300, quantity: 15 });
+  sellsCollection.insert({ item: "Keyboard", price: 300, quantity: 15 });
+  sellsCollection.insert({ item: "Mouse", price: 300, quantity: 15 });
   console.log("Sells inserted successfully!");
 };
 
