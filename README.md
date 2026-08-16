@@ -126,23 +126,40 @@ Both methods return `true` after the file is written.
 
 ## Read documents
 
-Queries use exact equality against the first property in the query object:
+Queries support exact equality, multiple fields, nested documents, comparison,
+membership, logical, existence, type, and regular-expression operators:
 
 ```ts
 const allUsers = await users.find();
 const engineers = await users.find({ role: "engineer" });
 const firstEngineer = await users.findOne({ role: "engineer" });
 
+const adults = await users.find({ age: { $gte: 18 } });
+const recent = await users.find({ createdAt: { $gt: new Date("2026-01-01") } });
+const selectedRoles = await users.find({ role: { $in: ["admin", "owner"] } });
+const brazilianUsers = await users.find({
+  profile: { location: { country: "Brazil" } },
+});
+const matchingNames = await users.find({ name: { $regex: "^Pamela", $options: "i" } });
+
 console.log(allUsers);
 console.log(engineers);
 console.log(firstEngineer);
 ```
 
-Limit the number of results with `limit`:
+Paginate and project results with `limit`, `skip`, and `projection`:
 
 ```ts
 const firstTwoUsers = await users.find({}, { limit: 2 });
 const matchingUsers = await users.find({ active: true }, { limit: "10" });
+const page = await users.find(
+  { active: true },
+  {
+    skip: 10,
+    limit: 10,
+    projection: { name: 1, email: 1, _id: 0 },
+  },
+);
 ```
 
 `find` returns an array. `findOne` returns the first matching document, or `null`
@@ -237,6 +254,7 @@ interface MongifyOptions {
 interface CollectionOptions {
   limit?: string | number;
   skip?: string | number;
+  projection?: Record<string, 0 | 1 | boolean>;
 }
 
 interface UpdateOptions {
@@ -306,8 +324,8 @@ export const B_TREE_WRITE_CONCURRENCY = 32;
 ## Important limitations
 
 - Mongify is intended for lightweight local workloads, not high-concurrency production databases.
-- Queries support exact equality only; operators such as `$gt`, `$in`, and `$or` are not implemented.
-- Only `limit` currently affects `find` results. The `skip` option is part of the type definition but is not applied by the current implementation.
+- Range and logical queries currently scan chunks; B+ tree acceleration is used for single-field equality queries.
+- Projection currently addresses top-level fields; dotted projection paths are not implemented.
 - Deletes do not currently merge underfilled B+ tree pages; rebuilding an index compacts them.
 - The in-process mutex coordinates instances in one Node.js process, not separate processes.
 - This chunked and paged-index format intentionally does not support databases created by older Mongify versions.

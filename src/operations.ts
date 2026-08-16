@@ -1,5 +1,6 @@
 import { v7 as uuid } from "uuid";
 import { Helpers } from "./helpers";
+import { normalizeQueryCount } from "./query";
 import type {
   CollectionIndex,
   CollectionOptions,
@@ -124,13 +125,15 @@ export class Operations {
     collection_name?: string,
   ): Promise<MongifyDocument[]> {
     return this.helpers._with_collection_lock(collection_name!, async () => {
-      const limit = options?.limit
-        ? parseInt(String(options.limit))
-        : undefined;
+      const limit = normalizeQueryCount(options?.limit, "limit");
+      const skip = normalizeQueryCount(options?.skip, "skip") ?? 0;
       return this.helpers._find_documents(
         collection_name!,
         query,
         limit,
+        false,
+        options?.projection,
+        skip,
       );
     });
   }

@@ -109,8 +109,17 @@ export class Helpers {
     query?: MongifyQuery,
     limit?: number,
     first = false,
+    projection?: Record<string, 0 | 1 | boolean>,
+    skip = 0,
   ): Promise<MongifyDocument[]> {
-    return this.storage.find(collection_name, query, limit, first);
+    return this.storage.find(
+      collection_name,
+      query,
+      limit,
+      first,
+      projection,
+      skip,
+    );
   }
 
   public async _update_documents(

@@ -19,6 +19,7 @@ export interface MongifyQuery {
 export interface CollectionOptions {
   limit?: string | number;
   skip?: string | number;
+  projection?: Record<string, 0 | 1 | boolean>;
 }
 
 export interface UpdateOptions {

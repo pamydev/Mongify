@@ -180,6 +180,64 @@ describe("Mongify functional API", () => {
 
     assert.equal(activeUsers.length, 1);
     assert.equal(activeUsers[0].active, true);
+
+    assert.equal((await users.find({}, { limit: "2" })).length, 2);
+    assert.deepEqual(await users.find({}, { limit: 0 }), []);
+    await assert.rejects(
+      () => users.find({}, { limit: -1 }),
+      /limit must be a non-negative integer/,
+    );
+  });
+
+  test("applies projection to find results", async () => {
+    const users = await database.createCollection("users");
+    await users.insert({ name: "Pamela", email: "pamela@example.com", password: "secret" });
+
+    const [user] = await users.find(
+      { name: "Pamela" },
+      { projection: { name: 1, _id: 0 } },
+    );
+
+    assert.deepEqual(user, { name: "Pamela" });
+  });
+
+  test("applies skip alone and together with limit and projection", async () => {
+    const users = await database.createCollection("users");
+    await users.insertMany([
+      { order: 1, name: "A" },
+      { order: 2, name: "B" },
+      { order: 3, name: "C" },
+      { order: 4, name: "D" },
+    ]);
+
+    assert.deepEqual(
+      (await users.find({}, { skip: 2 })).map(({ order }) => order),
+      [3, 4],
+    );
+    assert.deepEqual(
+      await users.find({}, {
+        skip: "1",
+        limit: 2,
+        projection: { order: 1, _id: 0 },
+      }),
+      [{ order: 2 }, { order: 3 }],
+    );
+    assert.deepEqual(await users.find({}, { skip: 10 }), []);
+    await users.createIndex("group");
+    await users.update({}, { group: "same" });
+    assert.deepEqual(
+      (
+        await users.find(
+          { group: "same" },
+          { skip: 1, limit: 2, projection: { order: 1, _id: 0 } },
+        )
+      ).map(({ order }) => order),
+      [2, 3],
+    );
+    await assert.rejects(
+      () => users.find({}, { skip: -1 }),
+      /skip must be a non-negative integer/,
+    );
   });
 
   test("findOne returns null when no document matches", async () => {

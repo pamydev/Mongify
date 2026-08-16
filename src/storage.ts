@@ -7,6 +7,7 @@ import {
   type BTreeReference,
 } from "./btree-index";
 import { CHUNK_SIZE_BYTES } from "./config";
+import { isSimpleEqualityQuery, matchesQuery, projectDocument } from "./query";
 import type {
   CollectionIndex,
   CreateIndexResult,
@@ -193,37 +194,42 @@ export class Storage {
     query?: MongifyQuery,
     limit?: number,
     first = false,
+    projection?: Record<string, 0 | 1 | boolean>,
+    skip = 0,
   ): Promise<MongifyDocument[]> {
+    if (limit === 0) {
+      return [];
+    }
     const metadata = await this._read_metadata(collection_name, false);
     if (!metadata) {
       return [];
     }
 
-    const query_keys = query ? Object.keys(query) : [];
-    if (query_keys.length === 0) {
-      return this._scan_chunks(collection_name, metadata, undefined, limit, first);
-    }
-
-    const field = query_keys[0];
-    const value = query![field];
-
-    if (metadata.indexes[field]) {
-      return this._find_with_index(
-        collection_name,
-        metadata,
-        field,
-        value,
-        limit,
-        first,
-      );
+    if (isSimpleEqualityQuery(query)) {
+      const field = Object.keys(query)[0];
+      const value = query[field];
+      if (metadata.indexes[field]) {
+        return this._find_with_index(
+          collection_name,
+          metadata,
+          field,
+          value,
+          limit,
+          first,
+          projection,
+          skip,
+        );
+      }
     }
 
     return this._scan_chunks(
       collection_name,
       metadata,
-      { field, value },
+      query,
       limit,
       first,
+      projection,
+      skip,
     );
   }
 
@@ -612,6 +618,8 @@ export class Storage {
     value: any,
     limit?: number,
     first = false,
+    projection?: Record<string, 0 | 1 | boolean>,
+    skip = 0,
   ): Promise<MongifyDocument[]> {
     const references = await this._index_references(
       collection_name,
@@ -621,6 +629,7 @@ export class Storage {
     );
     const chunk_cache = new Map<string, MongifyDocument[]>();
     const response: MongifyDocument[] = [];
+    let matched = 0;
 
     for (const reference of references) {
       let chunk = chunk_cache.get(reference.chunk);
@@ -635,7 +644,11 @@ export class Storage {
           this._values_equal(candidate[field], value),
       );
       if (document) {
-        response.push(document);
+        if (matched < skip) {
+          matched += 1;
+          continue;
+        }
+        response.push(projectDocument(document, projection));
       }
       if (first || (limit !== undefined && response.length >= limit)) {
         break;
@@ -650,11 +663,14 @@ export class Storage {
     metadata: CollectionMetadata,
     query: MongifyQuery,
   ): Promise<Map<string, MatchedChunk>> {
-    const field = Object.keys(query)[0];
-    const value = query[field];
     const result = new Map<string, MatchedChunk>();
 
-    if (metadata.indexes[field]) {
+    if (isSimpleEqualityQuery(query)) {
+      const field = Object.keys(query)[0];
+      const value = query[field];
+      if (!metadata.indexes[field]) {
+        return this._scan_matching_chunks(collection_name, metadata, query);
+      }
       const references = await this._index_references(
         collection_name,
         metadata,
@@ -695,6 +711,15 @@ export class Storage {
       return result;
     }
 
+    return this._scan_matching_chunks(collection_name, metadata, query);
+  }
+
+  private async _scan_matching_chunks(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    query: MongifyQuery,
+  ): Promise<Map<string, MatchedChunk>> {
+    const result = new Map<string, MatchedChunk>();
     for (const chunk_name of await this._list_chunks(collection_name, metadata)) {
       const documents = await this._read_chunk(
         collection_name,
@@ -703,7 +728,7 @@ export class Storage {
       );
       const matches: MatchedDocument[] = [];
       documents.forEach((document, position) => {
-        if (this._values_equal(document[field], value)) {
+        if (matchesQuery(document, query)) {
           matches.push({
             document,
             position,
@@ -721,18 +746,25 @@ export class Storage {
   private async _scan_chunks(
     collection_name: string,
     metadata: CollectionMetadata,
-    query?: { field: string; value: any },
+    query?: MongifyQuery,
     limit?: number,
     first = false,
+    projection?: Record<string, 0 | 1 | boolean>,
+    skip = 0,
   ): Promise<MongifyDocument[]> {
     const response: MongifyDocument[] = [];
+    let matched = 0;
     const chunk_names = await this._list_chunks(collection_name, metadata);
 
     for (const chunk_name of chunk_names) {
       const chunk = await this._read_chunk(collection_name, metadata, chunk_name);
       for (const document of chunk) {
-        if (!query || this._values_equal(document[query.field], query.value)) {
-          response.push(document);
+        if (matchesQuery(document, query)) {
+          if (matched < skip) {
+            matched += 1;
+            continue;
+          }
+          response.push(projectDocument(document, projection));
           if (first || (limit !== undefined && response.length >= limit)) {
             return response;
           }
