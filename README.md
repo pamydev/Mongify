@@ -1,5 +1,10 @@
 # Mongify
 
+[![Tests](https://github.com/pamydev/Mongify/actions/workflows/tests.yml/badge.svg)](https://github.com/pamydev/Mongify/actions/workflows/tests.yml)
+[![npm version](https://img.shields.io/npm/v/mongify.svg)](https://www.npmjs.com/package/mongify)
+[![npm downloads](https://img.shields.io/npm/dm/mongify.svg)](https://www.npmjs.com/package/mongify)
+[![license](https://img.shields.io/npm/l/mongify.svg)](https://www.npmjs.com/package/mongify)
+
 Mongify is a small file-based database for Node.js and TypeScript. It stores
 documents in JSON chunks and indexes them with paged B+ trees, making it useful
 for local tools and applications that do not need a database server.
