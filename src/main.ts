@@ -3,7 +3,8 @@ const path = require("path");
 const { v4: uuid } = require("uuid");
 
 class Main {
-  //
+  private database_path: string;
+  private collection: string;
 
   /**
    *
@@ -243,7 +244,7 @@ class Main {
   }
 
   /**@private */
-  async findOne(query, options) {
+  async findOne(query, options?: { limit?: number }) {
     //
 
     let response = [];
@@ -311,7 +312,7 @@ class Main {
   // LOCAL OPERATIONS =========================
 
   /**@private */
-  async _purge_and_write_entire_file(data) {
+  async _purge_and_write_entire_file(data?: any) {
     //
 
     data = JSON.stringify(data || []);
