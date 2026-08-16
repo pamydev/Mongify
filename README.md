@@ -1,14 +1,16 @@
 # Mongify
 
-Mongify is a small file-based database for Node.js and TypeScript. It stores each collection as a JSON file, so it is useful for prototypes, local tools, tests, and applications that do not need a database server.
+Mongify is a small file-based database for Node.js and TypeScript. It stores
+documents in JSON chunks and indexes them with paged B+ trees, making it useful
+for local tools and applications that do not need a database server.
 
 ## Features
 
 - Chunked JSON persistence
 - Configurable chunk size
-- Persistent single-field indexes
+- Persistent paged B+ tree indexes
 - Automatic unique `_id` index
-- Automatic `_id` generation with UUIDs
+- Automatic `_id` generation with time-ordered UUID v7 values
 - Simple collection API
 - TypeScript declarations
 - No database server or external service required
@@ -165,9 +167,10 @@ An indexed query reads only the chunks referenced by the index. Queries without 
 index scan the chunks in order. The `_id` index cannot be dropped, and inserts or
 updates that violate a unique index are rejected.
 
-Indexes are persisted on disk and cached in memory. Mongify verifies the current
-chunk signatures before accepting a persisted index and rebuilds a stale or missing
-index from the chunks.
+Indexes are persisted as paged B+ trees. A lookup reads only the tree path needed
+to reach the matching leaf instead of loading the complete index into memory.
+Mongify keeps a bounded page cache, verifies the current chunk signatures, and
+rebuilds a stale, missing, or corrupted index from the chunks.
 
 ## Update documents
 
@@ -241,14 +244,27 @@ export const CHUNK_SIZE_BYTES = 10 * 1024 * 1024;
 
 A document larger than the configured limit is stored alone in an oversized chunk.
 
+## B+ tree page size
+
+Index nodes contain at most 128 keys by default. Change `B_TREE_MAX_KEYS` in
+`src/config.ts` to benchmark different page fanouts. `B_TREE_PAGE_CACHE_SIZE`
+controls the maximum number of index pages retained in memory, while
+`B_TREE_WRITE_CONCURRENCY` limits simultaneous page writes:
+
+```ts
+export const B_TREE_MAX_KEYS = 128;
+export const B_TREE_PAGE_CACHE_SIZE = 256;
+export const B_TREE_WRITE_CONCURRENCY = 32;
+```
+
 ## Important limitations
 
 - Mongify is intended for lightweight local workloads, not high-concurrency production databases.
 - Queries support exact equality only; operators such as `$gt`, `$in`, and `$or` are not implemented.
 - Only `limit` currently affects `find` results. The `skip` option is part of the type definition but is not applied by the current implementation.
-- Updates and deletes currently rebuild the affected collection generation and its indexes.
+- Deletes do not currently merge underfilled B+ tree pages; rebuilding an index compacts them.
 - The in-process mutex coordinates instances in one Node.js process, not separate processes.
-- This chunked format intentionally does not support databases created by older Mongify versions.
+- This chunked and paged-index format intentionally does not support databases created by older Mongify versions.
 
 ## Development
 

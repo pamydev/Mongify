@@ -74,7 +74,7 @@ describe("Mongify advanced indexed stress", { concurrency: 1 }, () => {
       ".mongify",
       Buffer.from("documents").toString("base64url"),
       "indexes",
-      `${Buffer.from("index").toString("base64url")}.json`,
+      Buffer.from("index").toString("base64url"),
     );
     const size = await context.database.helpers._total_chunk_size("documents");
 
@@ -194,7 +194,7 @@ describe("Mongify advanced indexed stress", { concurrency: 1 }, () => {
   });
 
   test("rebuilds a missing persisted index", async () => {
-    await fs.unlink(indexPath);
+    await fs.rm(indexPath, { recursive: true, force: true });
     const startedAt = performance.now();
     const metrics = runColdQuery(TOTAL - 1);
     const elapsed = performance.now() - startedAt;
@@ -205,14 +205,20 @@ describe("Mongify advanced indexed stress", { concurrency: 1 }, () => {
   });
 
   test("rebuilds a corrupted persisted index", async () => {
-    await fs.writeFile(indexPath, "{corrupted index", "utf8");
+    await fs.writeFile(
+      path.join(indexPath, "metadata.json"),
+      "{corrupted index",
+      "utf8",
+    );
     const startedAt = performance.now();
     const metrics = runColdQuery(TOTAL - 1);
     const elapsed = performance.now() - startedAt;
 
     console.log(`Corrupted index rebuilt in ${formatDuration(elapsed)}`);
     assert.equal(metrics.found, true);
-    const rebuilt = JSON.parse(await fs.readFile(indexPath, "utf8"));
-    assert.equal(rebuilt.format, "mongify-index-v1");
+    const rebuilt = JSON.parse(
+      await fs.readFile(path.join(indexPath, "metadata.json"), "utf8"),
+    );
+    assert.equal(rebuilt.format, "mongify-btree-v1");
   });
 });

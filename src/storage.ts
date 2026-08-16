@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
+import {
+  BTreeIndex,
+  type BTreeChunkSignature,
+  type BTreeReference,
+} from "./btree-index";
 import { CHUNK_SIZE_BYTES } from "./config";
 import type {
   CollectionIndex,
@@ -19,30 +24,12 @@ interface CollectionMetadata {
   indexes: Record<string, IndexDefinition>;
 }
 
-interface IndexReference {
-  chunk: string;
-  id: string;
-}
-
-interface ChunkSignature {
-  name: string;
-  size: number;
-  modified: number;
-}
-
-interface PersistedIndex {
-  format: "mongify-index-v1";
-  field: string;
-  generation: string;
-  unique: boolean;
-  chunks: ChunkSignature[];
-  entries: Array<[string, IndexReference[]]>;
-}
+type IndexReference = BTreeReference;
+type ChunkSignature = BTreeChunkSignature;
 
 interface CachedIndex {
   generation: string;
-  unique: boolean;
-  values: Map<string, IndexReference[]>;
+  tree: BTreeIndex;
 }
 
 interface StoredDocument {
@@ -75,11 +62,15 @@ export class Storage {
     await fs.ensureDir(this._chunks_path(collection_name, metadata.generation));
     await fs.ensureDir(this._indexes_path(collection_name));
     await this._write_metadata(collection_name, metadata);
-    await this._persist_index(
-      collection_name,
-      metadata,
-      "_id",
-      { generation: metadata.generation, unique: true, values: new Map() },
+    await BTreeIndex.build(
+      this._index_path(collection_name, "_id"),
+      {
+        field: "_id",
+        generation: metadata.generation,
+        unique: true,
+        chunks: [],
+        entries: new Map(),
+      },
     );
   }
 
@@ -119,15 +110,17 @@ export class Storage {
 
     try {
       const stored = await this._write_generation(collection_name, next, documents);
-      const indexes = this._build_indexes(next, stored);
+      const indexes = await this._build_indexes(collection_name, next, stored);
 
       await this._write_metadata(collection_name, next);
       committed = true;
       this._clear_collection_cache(collection_name);
 
-      for (const [field, index] of indexes) {
-        index_cache.set(this._cache_key(collection_name, field), index);
-        await this._persist_index(collection_name, next, field, index);
+      for (const [field, tree] of indexes) {
+        index_cache.set(this._cache_key(collection_name, field), {
+          generation: next.generation,
+          tree,
+        });
       }
 
       if (current?.generation && current.generation !== next.generation) {
@@ -150,23 +143,26 @@ export class Storage {
     }
 
     const metadata = await this._read_metadata(collection_name, true);
-    const indexes = new Map<string, CachedIndex>();
+    const indexes = new Map<string, BTreeIndex>();
 
     for (const [field] of Object.entries(metadata!.indexes)) {
       indexes.set(field, await this._load_index(collection_name, metadata!, field));
     }
 
-    this._validate_unique_values(metadata!, indexes, documents);
+    await this._validate_unique_values(metadata!, indexes, documents);
     const stored = await this._append_to_generation(
       collection_name,
       metadata!,
       documents,
     );
 
-    for (const [field, index] of indexes) {
-      this._add_to_index(field, index, stored);
-      index_cache.set(this._cache_key(collection_name, field), index);
-      await this._persist_index(collection_name, metadata!, field, index);
+    const signatures = await this._chunk_signatures(collection_name, metadata!);
+    for (const [field, tree] of indexes) {
+      await tree.insertMany(this._tree_entries(field, stored), signatures);
+      index_cache.set(this._cache_key(collection_name, field), {
+        generation: metadata!.generation,
+        tree,
+      });
     }
   }
 
@@ -246,7 +242,7 @@ export class Storage {
       document: { ...match.document, ...update },
       reference: match.reference,
     }));
-    this._validate_unique_replacements(indexes, matches, replacements);
+    await this._validate_unique_replacements(indexes, matches, replacements);
 
     for (const chunk of matched_chunks.values()) {
       for (const match of chunk.matches) {
@@ -328,10 +324,12 @@ export class Storage {
       definition.unique,
     );
 
-    await this._persist_index(collection_name, metadata!, field, index);
     metadata!.indexes[field] = definition;
     await this._write_metadata(collection_name, metadata!);
-    index_cache.set(this._cache_key(collection_name, field), index);
+    index_cache.set(this._cache_key(collection_name, field), {
+      generation: metadata!.generation,
+      tree: index,
+    });
   }
 
   public async dropIndex(
@@ -350,6 +348,7 @@ export class Storage {
     delete metadata.indexes[field];
     await this._write_metadata(collection_name, metadata);
     await fs.remove(this._index_path(collection_name, field));
+    BTreeIndex.clearCache(this._index_path(collection_name, field));
     index_cache.delete(this._cache_key(collection_name, field));
   }
 
@@ -543,8 +542,12 @@ export class Storage {
     limit?: number,
     first = false,
   ): Promise<MongifyDocument[]> {
-    const index = await this._load_index(collection_name, metadata, field);
-    const references = index.values.get(this._index_key(value)) || [];
+    const references = await this._index_references(
+      collection_name,
+      metadata,
+      field,
+      value,
+    );
     const chunk_cache = new Map<string, MongifyDocument[]>();
     const response: MongifyDocument[] = [];
 
@@ -580,8 +583,12 @@ export class Storage {
     const result = new Map<string, MatchedChunk>();
 
     if (metadata.indexes[field]) {
-      const index = await this._load_index(collection_name, metadata, field);
-      const references = index.values.get(this._index_key(value)) || [];
+      const references = await this._index_references(
+        collection_name,
+        metadata,
+        field,
+        value,
+      );
       const grouped = new Map<string, IndexReference[]>();
       for (const reference of references) {
         const group = grouped.get(reference.chunk) || [];
@@ -668,46 +675,60 @@ export class Storage {
     collection_name: string,
     metadata: CollectionMetadata,
     field: string,
-  ): Promise<CachedIndex> {
+  ): Promise<BTreeIndex> {
     const cache_key = this._cache_key(collection_name, field);
     const cached = index_cache.get(cache_key);
     if (cached?.generation === metadata.generation) {
-      return cached;
+      return cached.tree;
     }
 
     try {
-      const serialized = await fs.readFile(
-        this._index_path(collection_name, field),
-        "utf8",
-      );
-      const persisted: PersistedIndex = JSON.parse(serialized);
       const signatures = await this._chunk_signatures(collection_name, metadata);
-
-      if (
-        persisted.format === "mongify-index-v1" &&
-        persisted.generation === metadata.generation &&
-        persisted.field === field &&
-        JSON.stringify(persisted.chunks) === JSON.stringify(signatures)
-      ) {
-        const index = {
-          generation: persisted.generation,
-          unique: persisted.unique,
-          values: new Map(persisted.entries),
-        };
-        index_cache.set(cache_key, index);
-        return index;
-      }
+      const tree = await BTreeIndex.open(this._index_path(collection_name, field), {
+        field,
+        generation: metadata.generation,
+        unique: metadata.indexes[field].unique,
+        chunks: signatures,
+      });
+      index_cache.set(cache_key, { generation: metadata.generation, tree });
+      return tree;
     } catch {}
 
-    const index = await this._build_index_from_chunks(
+    const tree = await this._build_index_from_chunks(
       collection_name,
       metadata,
       field,
       metadata.indexes[field].unique,
     );
-    index_cache.set(cache_key, index);
-    await this._persist_index(collection_name, metadata, field, index);
-    return index;
+    index_cache.set(cache_key, { generation: metadata.generation, tree });
+    return tree;
+  }
+
+  private async _index_references(
+    collection_name: string,
+    metadata: CollectionMetadata,
+    field: string,
+    value: any,
+  ): Promise<IndexReference[]> {
+    try {
+      const tree = await this._load_index(collection_name, metadata, field);
+      return await tree.search(this._index_key(value));
+    } catch {
+      const directory = this._index_path(collection_name, field);
+      index_cache.delete(this._cache_key(collection_name, field));
+      BTreeIndex.clearCache(directory);
+      const tree = await this._build_index_from_chunks(
+        collection_name,
+        metadata,
+        field,
+        metadata.indexes[field].unique,
+      );
+      index_cache.set(this._cache_key(collection_name, field), {
+        generation: metadata.generation,
+        tree,
+      });
+      return tree.search(this._index_key(value));
+    }
   }
 
   private async _build_index_from_chunks(
@@ -715,12 +736,8 @@ export class Storage {
     metadata: CollectionMetadata,
     field: string,
     unique: boolean,
-  ): Promise<CachedIndex> {
-    const index: CachedIndex = {
-      generation: metadata.generation,
-      unique,
-      values: new Map(),
-    };
+  ): Promise<BTreeIndex> {
+    const entries = new Map<string, IndexReference[]>();
 
     for (const chunk_name of await this._list_chunks(collection_name, metadata)) {
       const documents = await this._read_chunk(
@@ -728,24 +745,34 @@ export class Storage {
         metadata,
         chunk_name,
       );
-      this._add_to_index(
-        field,
-        index,
-        documents.map((document) => ({
-          document,
-          reference: { chunk: chunk_name, id: String(document._id) },
-        })),
-      );
+      for (const document of documents) {
+        if (!Object.prototype.hasOwnProperty.call(document, field)) {
+          continue;
+        }
+        const key = this._index_key(document[field]);
+        const references = entries.get(key) || [];
+        references.push({ chunk: chunk_name, id: String(document._id) });
+        if (unique && references.length > 1) {
+          throw new Error(`Duplicate value for unique index: ${field}`);
+        }
+        entries.set(key, references);
+      }
     }
 
-    return index;
+    return BTreeIndex.build(this._index_path(collection_name, field), {
+      field,
+      generation: metadata.generation,
+      unique,
+      chunks: await this._chunk_signatures(collection_name, metadata),
+      entries,
+    });
   }
 
   private async _load_all_indexes(
     collection_name: string,
     metadata: CollectionMetadata,
-  ): Promise<Map<string, CachedIndex>> {
-    const indexes = new Map<string, CachedIndex>();
+  ): Promise<Map<string, BTreeIndex>> {
+    const indexes = new Map<string, BTreeIndex>();
     for (const field of Object.keys(metadata.indexes)) {
       indexes.set(
         field,
@@ -756,129 +783,102 @@ export class Storage {
   }
 
   private _validate_unique_replacements(
-    indexes: Map<string, CachedIndex>,
+    indexes: Map<string, BTreeIndex>,
     previous: StoredDocument[],
     replacements: StoredDocument[],
-  ): void {
+  ): Promise<void> {
     const affected = new Set(
       previous.map(({ reference }) => `${reference.chunk}\0${reference.id}`),
     );
 
-    for (const [field, index] of indexes) {
-      if (!index.unique) {
-        continue;
-      }
-      const pending = new Set<string>();
-      for (const replacement of replacements) {
-        if (!Object.prototype.hasOwnProperty.call(replacement.document, field)) {
-          continue;
+    return (async () => {
+      for (const [field, tree] of indexes) {
+        if (!tree.unique) continue;
+        const pending = new Set<string>();
+        for (const replacement of replacements) {
+          if (!Object.prototype.hasOwnProperty.call(replacement.document, field)) {
+            continue;
+          }
+          const key = this._index_key(replacement.document[field]);
+          const existing = await tree.search(key);
+          const has_unaffected = existing.some(
+            (reference) => !affected.has(`${reference.chunk}\0${reference.id}`),
+          );
+          if (has_unaffected || pending.has(key)) {
+            throw new Error(`Duplicate value for unique index: ${field}`);
+          }
+          pending.add(key);
         }
-        const key = this._index_key(replacement.document[field]);
-        const has_unaffected = (index.values.get(key) || []).some(
-          (reference) => !affected.has(`${reference.chunk}\0${reference.id}`),
-        );
-        if (has_unaffected || pending.has(key)) {
-          throw new Error(`Duplicate value for unique index: ${field}`);
-        }
-        pending.add(key);
       }
-    }
+    })();
   }
 
   private async _replace_index_entries(
     collection_name: string,
     metadata: CollectionMetadata,
-    indexes: Map<string, CachedIndex>,
+    indexes: Map<string, BTreeIndex>,
     previous: StoredDocument[],
     replacements: StoredDocument[],
   ): Promise<void> {
-    for (const [field, index] of indexes) {
-      for (const entry of previous) {
-        if (!Object.prototype.hasOwnProperty.call(entry.document, field)) {
-          continue;
-        }
-        const key = this._index_key(entry.document[field]);
-        const remaining = (index.values.get(key) || []).filter(
-          (reference) =>
-            reference.chunk !== entry.reference.chunk ||
-            reference.id !== entry.reference.id,
-        );
-        if (remaining.length > 0) {
-          index.values.set(key, remaining);
-        } else {
-          index.values.delete(key);
-        }
-      }
-
-      this._add_to_index(field, index, replacements);
-      index_cache.set(this._cache_key(collection_name, field), index);
-      await this._persist_index(collection_name, metadata, field, index);
+    const signatures = await this._chunk_signatures(collection_name, metadata);
+    for (const [field, tree] of indexes) {
+      await tree.replaceReferences(
+        this._tree_entries(field, previous),
+        this._tree_entries(field, replacements),
+        signatures,
+      );
+      index_cache.set(this._cache_key(collection_name, field), {
+        generation: metadata.generation,
+        tree,
+      });
     }
   }
 
-  private _build_indexes(
+  private async _build_indexes(
+    collection_name: string,
     metadata: CollectionMetadata,
     stored: StoredDocument[],
-  ): Map<string, CachedIndex> {
-    return new Map(
-      Object.entries(metadata.indexes).map(([field, definition]) => [
+  ): Promise<Map<string, BTreeIndex>> {
+    const indexes = new Map<string, BTreeIndex>();
+    const signatures = await this._chunk_signatures(collection_name, metadata);
+    for (const [field, definition] of Object.entries(metadata.indexes)) {
+      const entries = new Map<string, IndexReference[]>();
+      for (const { key, reference } of this._tree_entries(field, stored)) {
+        const references = entries.get(key) || [];
+        references.push(reference);
+        entries.set(key, references);
+      }
+      indexes.set(
         field,
-        this._build_index(field, definition.unique, metadata, stored),
-      ]),
-    );
-  }
-
-  private _build_index(
-    field: string,
-    unique: boolean,
-    metadata: CollectionMetadata,
-    stored: StoredDocument[],
-  ): CachedIndex {
-    const index: CachedIndex = {
-      generation: metadata.generation,
-      unique,
-      values: new Map(),
-    };
-    this._add_to_index(field, index, stored);
-    return index;
-  }
-
-  private _add_to_index(
-    field: string,
-    index: CachedIndex,
-    stored: StoredDocument[],
-  ): void {
-    for (const entry of stored) {
-      if (!Object.prototype.hasOwnProperty.call(entry.document, field)) {
-        continue;
-      }
-      const key = this._index_key(entry.document[field]);
-      const references = index.values.get(key) || [];
-      if (index.unique && references.length > 0) {
-        throw new Error(`Duplicate value for unique index: ${field}`);
-      }
-      references.push(entry.reference);
-      index.values.set(key, references);
+        await BTreeIndex.build(this._index_path(collection_name, field), {
+          field,
+          generation: metadata.generation,
+          unique: definition.unique,
+          chunks: signatures,
+          entries,
+        }),
+      );
     }
+    return indexes;
   }
 
-  private _validate_unique_values(
+  private async _validate_unique_values(
     metadata: CollectionMetadata,
-    indexes: Map<string, CachedIndex>,
+    indexes: Map<string, BTreeIndex>,
     documents: MongifyDocument[],
-  ): void {
+  ): Promise<void> {
     for (const [field, definition] of Object.entries(metadata.indexes)) {
       if (!definition.unique) {
         continue;
       }
-      const existing = indexes.get(field)!;
+      const tree = indexes.get(field)!;
       const pending = new Set<string>();
       for (const document of documents) {
         if (!Object.prototype.hasOwnProperty.call(document, field)) {
           continue;
         }
         const key = this._index_key(document[field]);
-        if (existing.values.has(key) || pending.has(key)) {
+        if ((await tree.search(key)).length > 0 || pending.has(key)) {
           throw new Error(`Duplicate value for unique index: ${field}`);
         }
         pending.add(key);
@@ -886,25 +886,18 @@ export class Storage {
     }
   }
 
-  private async _persist_index(
-    collection_name: string,
-    metadata: CollectionMetadata,
+  private _tree_entries(
     field: string,
-    index: CachedIndex,
-  ): Promise<void> {
-    await fs.ensureDir(this._indexes_path(collection_name));
-    const persisted: PersistedIndex = {
-      format: "mongify-index-v1",
-      field,
-      generation: metadata.generation,
-      unique: index.unique,
-      chunks: await this._chunk_signatures(collection_name, metadata),
-      entries: Array.from(index.values.entries()),
-    };
-    await this._atomic_write(
-      this._index_path(collection_name, field),
-      JSON.stringify(persisted),
-    );
+    stored: StoredDocument[],
+  ): Array<{ key: string; reference: IndexReference }> {
+    return stored
+      .filter(({ document }) =>
+        Object.prototype.hasOwnProperty.call(document, field),
+      )
+      .map(({ document, reference }) => ({
+        key: this._index_key(document[field]),
+        reference,
+      }));
   }
 
   private async _read_stored_documents(
@@ -1029,7 +1022,7 @@ export class Storage {
   private _index_path(collection_name: string, field: string): string {
     return path.join(
       this._indexes_path(collection_name),
-      `${Buffer.from(field).toString("base64url")}.json`,
+      Buffer.from(field).toString("base64url"),
     );
   }
 
@@ -1038,6 +1031,7 @@ export class Storage {
   }
 
   private _clear_collection_cache(collection_name: string): void {
+    BTreeIndex.clearCache(this._indexes_path(collection_name));
     const prefix = `${this._manifest_path(collection_name)}\0`;
     for (const key of index_cache.keys()) {
       if (key.startsWith(prefix)) {

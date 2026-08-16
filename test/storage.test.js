@@ -5,6 +5,7 @@ const path = require("node:path");
 const fsExtra = require("fs-extra");
 
 const { CHUNK_SIZE_BYTES } = require("../dist/config.js");
+const { BTreeIndex } = require("../dist/btree-index.js");
 const {
   createTestDatabase,
   removeTestDatabase,
@@ -85,5 +86,87 @@ describe("Mongify chunk storage", () => {
     }
 
     assert.equal(chunksRead.size, 1, Array.from(chunksRead).join("\n"));
+  });
+
+  test("stores a multi-level index as paged B-tree nodes", async () => {
+    const collection = await context.database.createCollection("documents");
+    await collection.createIndex("index", { unique: true });
+    await collection.insertMany(
+      Array.from({ length: 2_000 }, (_, index) => ({ index, name: `doc-${index}` })),
+    );
+
+    const indexPath = path.join(
+      context.temporaryDirectory,
+      "Mongify",
+      "chunks",
+      ".mongify",
+      Buffer.from("documents").toString("base64url"),
+      "indexes",
+      Buffer.from("index").toString("base64url"),
+    );
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(indexPath, "metadata.json"), "utf8"),
+    );
+    const pageNames = await fs.readdir(path.join(indexPath, "pages"));
+    const root = JSON.parse(
+      await fs.readFile(
+        path.join(indexPath, "pages", `${String(metadata.root).padStart(8, "0")}.json`),
+        "utf8",
+      ),
+    );
+
+    assert.equal(metadata.format, "mongify-btree-v1");
+    assert.ok(pageNames.length > 1);
+    assert.equal(root.leaf, false);
+
+    BTreeIndex.clearCache(indexPath);
+    const pagesRead = new Set();
+    const originalReadFile = fsExtra.readFile;
+    fsExtra.readFile = async (file, ...args) => {
+      if (String(file).startsWith(`${path.join(indexPath, "pages")}${path.sep}`)) {
+        pagesRead.add(String(file));
+      }
+      return originalReadFile.call(fsExtra, file, ...args);
+    };
+
+    try {
+      assert.equal((await collection.findOne({ index: 1_999 })).name, "doc-1999");
+    } finally {
+      fsExtra.readFile = originalReadFile;
+    }
+
+    assert.ok(pagesRead.size >= 2);
+    assert.ok(pagesRead.size <= 4, Array.from(pagesRead).join("\n"));
+  });
+
+  test("rebuilds an index when a B-tree page is corrupted", async () => {
+    const collection = await context.database.createCollection("documents");
+    await collection.createIndex("index", { unique: true });
+    await collection.insertMany(
+      Array.from({ length: 500 }, (_, index) => ({ index, name: `doc-${index}` })),
+    );
+
+    const indexPath = path.join(
+      context.temporaryDirectory,
+      "Mongify",
+      "chunks",
+      ".mongify",
+      Buffer.from("documents").toString("base64url"),
+      "indexes",
+      Buffer.from("index").toString("base64url"),
+    );
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(indexPath, "metadata.json"), "utf8"),
+    );
+    const rootPath = path.join(
+      indexPath,
+      "pages",
+      `${String(metadata.root).padStart(8, "0")}.json`,
+    );
+    await fs.writeFile(rootPath, "{corrupted page", "utf8");
+    BTreeIndex.clearCache(indexPath);
+
+    assert.equal((await collection.findOne({ index: 499 })).name, "doc-499");
+    assert.doesNotReject(async () => JSON.parse(await fs.readFile(rootPath, "utf8")));
   });
 });
