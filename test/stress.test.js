@@ -1,7 +1,5 @@
 const { afterEach, beforeEach, describe, test } = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs/promises");
-const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 
 const {
@@ -101,9 +99,9 @@ describe("Mongify stress", () => {
     );
   });
 
-  const total = 120_000;
+  const total = 1_000_000;
   const totalDummyFields = 50;
-  test(`findOne searches a file with ${total.toLocaleString("en-US")} documents`, async () => {
+  test(`findOne searches chunks containing ${total.toLocaleString("en-US")} documents`, async () => {
     const collection = await context.database.createCollection("documents");
 
     const targetIndex = total - 1;
@@ -115,32 +113,45 @@ describe("Mongify stress", () => {
       }));
     };
 
-    await collection.insertMany(
-      Array.from({ length: total }, (_, index) => ({
-        index,
-        name: `document-${index}`,
-        ...Object.fromEntries(
-          createDummyFields(totalDummyFields).map(({ key, value }) => [
-            key,
-            value,
-          ]),
-        ),
-      })),
-    );
+    await collection.createIndex("index", { unique: true });
+    const maxTotal = 100_000;
+    const operations = Math.ceil(total / maxTotal);
+    for (let i = 0; i < operations; i += 1) {
+      const start = i * maxTotal;
+      const end = Math.min(start + maxTotal, total);
+      await collection.insertMany(
+        Array.from({ length: end - start }, (_, index) => ({
+          index: start + index,
+          name: `document-${start + index}`,
+          ...Object.fromEntries(
+            createDummyFields(totalDummyFields).map(({ key, value }) => [
+              key,
+              value,
+            ]),
+          ),
+        })),
+      );
+    }
+    // await collection.insertMany(
+    //   Array.from({ length: total }, (_, index) => ({
+    //     index,
+    //     name: `document-${index}`,
+    //     ...Object.fromEntries(
+    //       createDummyFields(totalDummyFields).map(({ key, value }) => [
+    //         key,
+    //         value,
+    //       ]),
+    //     ),
+    //   })),
+    // );
 
-    const collectionPath = path.join(
-      context.temporaryDirectory,
-      "Mongify",
-      "stress",
-      "documents.json",
-    );
-    const { size } = await fs.stat(collectionPath);
+    const size = await context.database.helpers._total_chunk_size("documents");
     const startedAt = performance.now();
     const document = await collection.findOne({ index: targetIndex });
     const elapsedMilliseconds = performance.now() - startedAt;
 
     console.log(
-      `findOne() found the last of ${total.toLocaleString("en-US")} documents in ${formatDuration(elapsedMilliseconds)} (JSON file: ${(size / 1024 / 1024).toFixed(2)} MB)`,
+      `findOne() found the last of ${total.toLocaleString("en-US")} documents in ${formatDuration(elapsedMilliseconds)} (chunks: ${(size / 1024 / 1024).toFixed(2)} MB)`,
     );
 
     assert.equal(document.index, targetIndex);

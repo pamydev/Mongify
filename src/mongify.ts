@@ -1,5 +1,11 @@
 import { Operations } from "./operations";
 import { Helpers } from "./helpers";
+import type {
+  Collection,
+  CollectionOptions,
+  MongifyOptions,
+  MongifyQuery,
+} from "./types";
 
 class Main {
   private operations: Operations;
@@ -15,7 +21,7 @@ class Main {
       const names = await this.listCollections();
 
       if (!names.includes(collection_name)) {
-        await this.helpers._purge_and_write_entire_file(collection_name, []);
+        await this.helpers._create_collection(collection_name);
       }
     });
     return this.getCollection(collection_name);
@@ -23,9 +29,7 @@ class Main {
 
   public async deleteCollection(collection_name: string): Promise<boolean> {
     return this.helpers._with_collection_lock(collection_name, async () => {
-      await this.helpers._delete_file(
-        this.helpers._get_collection_path(collection_name),
-      );
+      await this.helpers._delete_collection(collection_name);
       return true;
     });
   }
@@ -55,7 +59,25 @@ class Main {
         this.operations.insertMany(documentsArray, collection),
 
       delete: async (query) => this.operations.delete(query, collection),
+
+      createIndex: async (field, options) =>
+        this.operations.createIndex(field, options, collection),
+
+      dropIndex: async (field) =>
+        this.operations.dropIndex(field, collection),
+
+      listIndexes: async () => this.operations.listIndexes(collection),
     };
   }
 }
 export { Main as Mongify };
+export type {
+  Collection,
+  CollectionIndex,
+  CollectionOptions,
+  IndexOptions,
+  MongifyDocument,
+  MongifyOptions,
+  MongifyQuery,
+  UpdateOptions,
+} from "./types";

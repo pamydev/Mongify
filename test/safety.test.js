@@ -84,9 +84,10 @@ describe("Mongify safety regressions", () => {
       "Mongify",
       "safety",
     );
-    const files = await fs.readdir(databasePath);
+    const files = await fs.readdir(databasePath, { recursive: true });
 
-    assert.deepEqual(files, ["users.json"]);
+    assert.ok(files.includes("users.json"));
+    assert.ok(files.every((file) => !file.endsWith(".tmp")));
   });
 
   test("does not create a collection when deleting from a missing one", async () => {

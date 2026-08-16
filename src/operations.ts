@@ -1,5 +1,14 @@
 import { v4 as uuid } from "uuid";
 import { Helpers } from "./helpers";
+import type {
+  CollectionIndex,
+  CollectionOptions,
+  IndexOptions,
+  MongifyDocument,
+  MongifyOptions,
+  MongifyQuery,
+  UpdateOptions,
+} from "./types";
 
 interface PendingInsert {
   document: MongifyDocument;
@@ -25,17 +34,7 @@ export class Operations {
     collection_name: string,
   ): Promise<boolean> {
     return this.helpers._with_collection_lock(collection_name, async () => {
-      const { key, value } = this.helpers._turn_query_into_search_params(query);
-      const file = await this.helpers._read_entire_json_file({ collection_name });
-      const filtered = this.helpers._filter_inverse_array(file, key, value);
-
-      if (filtered.length !== file.length) {
-        await this.helpers._purge_and_write_entire_file(
-          collection_name,
-          filtered,
-        );
-      }
-
+      await this.helpers._delete_documents(collection_name, query);
       return true;
     });
   }
@@ -82,16 +81,11 @@ export class Operations {
         const pending = batch.pending.splice(0);
 
         try {
-          const file = await this.helpers._read_entire_json_file({
-            collection_name,
-            create_new: true,
-          });
-
-          for (const entry of pending) {
-            file.push({ ...entry.document, _id: uuid() });
-          }
-
-          await this.helpers._purge_and_write_entire_file(collection_name, file);
+          const documents = pending.map((entry) => ({
+            ...entry.document,
+            _id: uuid(),
+          }));
+          await this.helpers._append_documents(collection_name, documents);
           pending.forEach(({ resolve }) => resolve(true));
         } catch (error) {
           pending.forEach(({ reject }) => reject(error));
@@ -111,17 +105,14 @@ export class Operations {
     collection_name: string,
   ): Promise<boolean> {
     return this.helpers._with_collection_lock(collection_name, async () => {
-      const file = await this.helpers._read_entire_json_file({
-        collection_name,
-        create_new: true,
-      });
+      const documents: MongifyDocument[] = [];
 
       for (const document of documentsArray) {
         const { _id: ignored_id, ...document_without_id } = document;
-        file.push({ ...document_without_id, _id: uuid() });
+        documents.push({ ...document_without_id, _id: uuid() });
       }
 
-      await this.helpers._purge_and_write_entire_file(collection_name, file);
+      await this.helpers._append_documents(collection_name, documents);
       return true;
     });
   }
@@ -132,19 +123,14 @@ export class Operations {
     collection_name?: string,
   ): Promise<MongifyDocument[]> {
     return this.helpers._with_collection_lock(collection_name!, async () => {
-      let response = [];
-      const file = await this.helpers._read_entire_json_file({ collection_name });
-      if (!query || Object.keys(query).length === 0) {
-        response = file;
-      }
-      if (query && Object.keys(query).length > 0) {
-        const { key, value } = this.helpers._turn_query_into_search_params(query);
-        response = this.helpers._filter_array(file, key, value);
-      }
-      if (options?.limit) {
-        response = response.slice(0, parseInt(String(options.limit)));
-      }
-      return response;
+      const limit = options?.limit
+        ? parseInt(String(options.limit))
+        : undefined;
+      return this.helpers._find_documents(
+        collection_name!,
+        query,
+        limit,
+      );
     });
   }
 
@@ -154,17 +140,43 @@ export class Operations {
     collection_name?: string,
   ): Promise<MongifyDocument | MongifyDocument[]> {
     return this.helpers._with_collection_lock(collection_name!, async () => {
-      let response = [];
-      const file = await this.helpers._read_entire_json_file({ collection_name });
-      if (!query || Object.keys(query).length === 0) {
-        response = file;
-      }
-      if (query && Object.keys(query).length > 0) {
-        const { key, value } = this.helpers._turn_query_into_search_params(query);
-        response = this.helpers._filter_array(file, key, value);
-      }
+      const response = await this.helpers._find_documents(
+        collection_name!,
+        query,
+        1,
+        true,
+      );
       return response[0] || response;
     });
+  }
+
+  public async createIndex(
+    field: string,
+    options: IndexOptions | undefined,
+    collection_name: string,
+  ): Promise<boolean> {
+    return this.helpers._with_collection_lock(collection_name, async () => {
+      await this.helpers._create_index(collection_name, field, options);
+      return true;
+    });
+  }
+
+  public async dropIndex(
+    field: string,
+    collection_name: string,
+  ): Promise<boolean> {
+    return this.helpers._with_collection_lock(collection_name, async () => {
+      await this.helpers._drop_index(collection_name, field);
+      return true;
+    });
+  }
+
+  public async listIndexes(
+    collection_name: string,
+  ): Promise<CollectionIndex[]> {
+    return this.helpers._with_collection_lock(collection_name, async () =>
+      this.helpers._list_indexes(collection_name),
+    );
   }
 
   public async update(
@@ -178,29 +190,12 @@ export class Operations {
     }
 
     return this.helpers._with_collection_lock(collection_name!, async () => {
-      const file = await this.helpers._read_entire_json_file({ collection_name });
-      const { key: query_key, value: query_value } =
-        this.helpers._turn_query_into_search_params(query);
-      let matched = false;
-
-      for (const document of file) {
-        if (document[query_key] === query_value) {
-          matched = true;
-          Object.assign(document, update);
-        }
-      }
-
-      if (matched) {
-        await this.helpers._purge_and_write_entire_file(collection_name!, file);
-      } else if (options?.upsert) {
-        const { _id: ignored_id, ...document_without_id } = {
-          ...query,
-          ...update,
-        };
-        file.push({ ...document_without_id, _id: uuid() });
-        await this.helpers._purge_and_write_entire_file(collection_name!, file);
-      }
-
+      await this.helpers._update_documents(
+        collection_name!,
+        query,
+        update,
+        options?.upsert === true,
+      );
       return true;
     });
   }

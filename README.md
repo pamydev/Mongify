@@ -4,7 +4,10 @@ Mongify is a small file-based database for Node.js and TypeScript. It stores eac
 
 ## Features
 
-- JSON-file persistence
+- Chunked JSON persistence
+- Configurable chunk size
+- Persistent single-field indexes
+- Automatic unique `_id` index
 - Automatic `_id` generation with UUIDs
 - Simple collection API
 - TypeScript declarations
@@ -76,7 +79,9 @@ const database = new Mongify({
 });
 ```
 
-Each collection is stored as `<collection_name>.json` inside the database directory.
+Each collection keeps a small `<collection_name>.json` manifest in the database
+directory. Documents are stored in numbered JSON chunks under Mongify's internal
+`.mongify` directory.
 
 ## Collections
 
@@ -89,7 +94,8 @@ const products = await database.createCollection("products");
 const existingProducts = database.getCollection("products");
 ```
 
-`createCollection` initializes the collection with an empty array. Use `getCollection` when the collection may already contain data.
+`createCollection` initializes a missing collection and preserves an existing one.
+Use `getCollection` when you only need a collection handle.
 
 List or delete collections:
 
@@ -139,6 +145,30 @@ const matchingUsers = await users.find({ active: true }, { limit: "10" });
 
 `find` returns an array. `findOne` returns the first matching document, or an array when no document matches.
 
+## Indexes
+
+Every collection has a unique `_id` index automatically. Create indexes for fields
+used frequently by exact-equality queries:
+
+```ts
+await users.createIndex("email", { unique: true });
+await users.createIndex("active");
+
+console.log(await users.listIndexes());
+
+const user = await users.findOne({ email: "ada@example.com" });
+
+await users.dropIndex("active");
+```
+
+An indexed query reads only the chunks referenced by the index. Queries without an
+index scan the chunks in order. The `_id` index cannot be dropped, and inserts or
+updates that violate a unique index are rejected.
+
+Indexes are persisted on disk and cached in memory. Mongify verifies the current
+chunk signatures before accepting a persisted index and rebuilds a stale or missing
+index from the chunks.
+
 ## Update documents
 
 ```ts
@@ -183,6 +213,10 @@ interface UpdateOptions {
   upsert?: boolean;
 }
 
+interface IndexOptions {
+  unique?: boolean;
+}
+
 interface Collection {
   find(query?: Record<string, unknown>, options?: CollectionOptions): Promise<Record<string, unknown>[]>;
   findOne(query?: Record<string, unknown>): Promise<Record<string, unknown> | Record<string, unknown>[]>;
@@ -190,16 +224,31 @@ interface Collection {
   insertMany(documents: Record<string, unknown>[]): Promise<boolean>;
   update(query: Record<string, unknown>, update: Record<string, unknown>, options?: UpdateOptions): Promise<boolean>;
   delete(query: Record<string, unknown>): Promise<boolean>;
+  createIndex(field: string, options?: IndexOptions): Promise<boolean>;
+  dropIndex(field: string): Promise<boolean>;
+  listIndexes(): Promise<Array<{ field: string; unique: boolean }>>;
 }
 ```
+
+## Chunk size
+
+The default maximum chunk size is 10 MiB. Change `CHUNK_SIZE_BYTES` in
+`src/config.ts` when benchmarking different chunk sizes:
+
+```ts
+export const CHUNK_SIZE_BYTES = 10 * 1024 * 1024;
+```
+
+A document larger than the configured limit is stored alone in an oversized chunk.
 
 ## Important limitations
 
 - Mongify is intended for lightweight local workloads, not high-concurrency production databases.
 - Queries support exact equality only; operators such as `$gt`, `$in`, and `$or` are not implemented.
 - Only `limit` currently affects `find` results. The `skip` option is part of the type definition but is not applied by the current implementation.
-- `createCollection` resets the collection file. Use `getCollection` to open an existing collection.
-- Collection data is loaded and rewritten as a whole JSON array for each operation.
+- Updates and deletes currently rebuild the affected collection generation and its indexes.
+- The in-process mutex coordinates instances in one Node.js process, not separate processes.
+- This chunked format intentionally does not support databases created by older Mongify versions.
 
 ## Development
 

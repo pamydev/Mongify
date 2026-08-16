@@ -91,6 +91,19 @@ describe("Mongify functional API", () => {
     assert.deepEqual(result, []);
   });
 
+  test("findOne scans until a non-indexed document matches", async () => {
+    const users = await database.createCollection("users");
+    await users.insertMany([
+      { name: "A" },
+      { name: "B" },
+      { name: "target" },
+    ]);
+
+    const result = await users.findOne({ name: "target" });
+
+    assert.equal(result.name, "target");
+  });
+
   test("updates every matching document", async () => {
     const users = await database.createCollection("users");
     await users.insertMany([
@@ -148,6 +161,67 @@ describe("Mongify functional API", () => {
     const collections = await database.listCollections();
 
     assert.deepEqual(collections, []);
+  });
+
+  test("creates, lists and drops indexes", async () => {
+    const users = await database.createCollection("users");
+
+    assert.deepEqual(await users.listIndexes(), [
+      { field: "_id", unique: true },
+    ]);
+
+    await users.createIndex("email", { unique: true });
+
+    assert.deepEqual(await users.listIndexes(), [
+      { field: "_id", unique: true },
+      { field: "email", unique: true },
+    ]);
+
+    await users.dropIndex("email");
+
+    assert.deepEqual(await users.listIndexes(), [
+      { field: "_id", unique: true },
+    ]);
+  });
+
+  test("rejects duplicate values in a unique index", async () => {
+    const users = await database.createCollection("users");
+    await users.createIndex("email", { unique: true });
+
+    await assert.rejects(
+      () =>
+        users.insertMany([
+          { email: "pamela@example.com" },
+          { email: "pamela@example.com" },
+        ]),
+      /Duplicate value for unique index: email/,
+    );
+
+    assert.deepEqual(await users.find(), []);
+  });
+
+  test("keeps indexes synchronized after updates and deletes", async () => {
+    const users = await database.createCollection("users");
+    await users.createIndex("email", { unique: true });
+    await users.insertMany([
+      { name: "Pamela", email: "old@example.com" },
+      { name: "Alice", email: "alice@example.com" },
+    ]);
+
+    await users.update(
+      { email: "old@example.com" },
+      { email: "new@example.com" },
+    );
+
+    assert.deepEqual(await users.findOne({ email: "old@example.com" }), []);
+    assert.equal(
+      (await users.findOne({ email: "new@example.com" })).name,
+      "Pamela",
+    );
+
+    await users.delete({ email: "new@example.com" });
+
+    assert.deepEqual(await users.findOne({ email: "new@example.com" }), []);
   });
 
   test("reports malformed JSON instead of silently replacing it", async () => {

@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "allowJs": true,
     "noEmit": false,
-    "incremental": true,
+    "incremental": false,
     "declaration": true,
     "types": ["node"]
   },

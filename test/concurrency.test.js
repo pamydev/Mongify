@@ -41,10 +41,10 @@ describe("Mongify concurrency", () => {
   test("persists a simultaneous insert burst as one batch", async () => {
     const collection = await context.database.createCollection("events");
     const helpers = context.database.helpers;
-    const originalWrite = helpers._purge_and_write_entire_file.bind(helpers);
+    const originalWrite = helpers._append_documents.bind(helpers);
     let writes = 0;
 
-    helpers._purge_and_write_entire_file = async (...args) => {
+    helpers._append_documents = async (...args) => {
       writes += 1;
       return originalWrite(...args);
     };
@@ -56,7 +56,7 @@ describe("Mongify concurrency", () => {
         ),
       );
     } finally {
-      helpers._purge_and_write_entire_file = originalWrite;
+      helpers._append_documents = originalWrite;
     }
 
     assert.equal(writes, 1);

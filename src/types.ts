@@ -1,25 +1,40 @@
-interface IReadEntireJsonFile {
+export interface IReadEntireJsonFile {
   collection_name: string;
   create_new?: boolean;
 }
-interface MongifyOptions {
+
+export interface MongifyOptions {
   path?: string;
   database_name: string;
 }
-interface MongifyDocument {
+
+export interface MongifyDocument {
   [key: string]: any;
 }
-interface MongifyQuery {
+
+export interface MongifyQuery {
   [key: string]: any;
 }
-interface CollectionOptions {
+
+export interface CollectionOptions {
   limit?: string | number;
   skip?: string | number;
 }
-interface UpdateOptions {
+
+export interface UpdateOptions {
   upsert?: boolean;
 }
-interface Collection {
+
+export interface IndexOptions {
+  unique?: boolean;
+}
+
+export interface CollectionIndex {
+  field: string;
+  unique: boolean;
+}
+
+export interface Collection {
   find(
     query?: MongifyQuery,
     options?: CollectionOptions,
@@ -33,4 +48,7 @@ interface Collection {
   insert(document: MongifyDocument): Promise<boolean>;
   insertMany(documentsArray: MongifyDocument[]): Promise<boolean>;
   delete(query: MongifyQuery): Promise<boolean>;
+  createIndex(field: string, options?: IndexOptions): Promise<boolean>;
+  dropIndex(field: string): Promise<boolean>;
+  listIndexes(): Promise<CollectionIndex[]>;
 }

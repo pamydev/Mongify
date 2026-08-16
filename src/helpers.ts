@@ -1,10 +1,20 @@
 import fs from "fs-extra";
 import path from "path";
+import { Storage } from "./storage";
+import type {
+  CollectionIndex,
+  IndexOptions,
+  IReadEntireJsonFile,
+  MongifyDocument,
+  MongifyOptions,
+  MongifyQuery,
+} from "./types";
 
 const collection_queues = new Map<string, Promise<void>>();
 
 export class Helpers {
   database_path: string;
+  private storage: Storage;
 
   constructor(args0: MongifyOptions) {
     this._validate_name(args0?.database_name, "Database name");
@@ -20,16 +30,11 @@ export class Helpers {
       "Mongify",
       args0.database_name,
     );
+    this.storage = new Storage(this.database_path);
   }
 
-  public async _create_database(): Promise<string | boolean> {
-    if (!fs.existsSync(this.database_path)) {
-      try {
-        fs.mkdirSync(this.database_path, { recursive: true });
-      } catch (e) {
-        throw new Error("Error code kl3: " + e);
-      }
-    }
+  public async _create_database(): Promise<string> {
+    fs.ensureDirSync(this.database_path);
     return this.database_path;
   }
 
@@ -63,77 +68,97 @@ export class Helpers {
     }
   }
 
+  public async _create_collection(collection_name: string): Promise<void> {
+    this._get_collection_path(collection_name);
+    await this.storage.createCollection(collection_name);
+  }
+
+  public async _delete_collection(collection_name: string): Promise<void> {
+    this._get_collection_path(collection_name);
+    await this.storage.deleteCollection(collection_name);
+  }
+
   public async _purge_and_write_entire_file(
     collection_name: string,
     data?: MongifyDocument[],
   ): Promise<boolean> {
-    const serialized_data = JSON.stringify(data || []);
-    const collection_path = this._get_collection_path(collection_name);
-    const temporary_path = path.join(
-      this.database_path,
-      `.${path.basename(collection_path)}.${process.pid}.${Date.now()}.${Math.random()
-        .toString(16)
-        .slice(2)}.tmp`,
-    );
+    await this.storage.replaceAll(collection_name, data || []);
+    return true;
+  }
 
-    try {
-      await fs.writeFile(temporary_path, serialized_data, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      await fs.rename(temporary_path, collection_path);
-    } catch (error) {
-      await fs.unlink(temporary_path).catch(() => undefined);
-      throw error;
-    }
-
+  public async _append_documents(
+    collection_name: string,
+    documents: MongifyDocument[],
+  ): Promise<boolean> {
+    await this.storage.append(collection_name, documents);
     return true;
   }
 
   public async _read_entire_json_file(
     args0: IReadEntireJsonFile,
   ): Promise<MongifyDocument[]> {
-    const { collection_name, create_new } = args0;
-    const collection_path = this._get_collection_path(collection_name);
-    let json: string;
-    try {
-      json = await fs.readFile(collection_path, {
-        encoding: "utf8",
-      });
-    } catch (e) {
-      if (create_new) {
-        await this._purge_and_write_entire_file(collection_name);
-        json = await fs.readFile(collection_path, {
-          encoding: "utf8",
-        });
-      } else {
-        return [];
-      }
-    }
-    let res: MongifyDocument[] = [];
-    if (json && json != "") {
-      res = JSON.parse(json);
-    } else {
-      res = [];
-    }
-    return res;
+    return this.storage.readAll(
+      args0.collection_name,
+      args0.create_new === true,
+    );
+  }
+
+  public async _find_documents(
+    collection_name: string,
+    query?: MongifyQuery,
+    limit?: number,
+    first = false,
+  ): Promise<MongifyDocument[]> {
+    return this.storage.find(collection_name, query, limit, first);
+  }
+
+  public async _update_documents(
+    collection_name: string,
+    query: MongifyQuery,
+    update: MongifyDocument,
+    upsert = false,
+  ): Promise<void> {
+    await this.storage.update(collection_name, query, update, upsert);
+  }
+
+  public async _delete_documents(
+    collection_name: string,
+    query: MongifyQuery,
+  ): Promise<void> {
+    await this.storage.delete(collection_name, query);
+  }
+
+  public async _create_index(
+    collection_name: string,
+    field: string,
+    options?: IndexOptions,
+  ): Promise<void> {
+    await this.storage.createIndex(collection_name, field, options);
+  }
+
+  public async _drop_index(
+    collection_name: string,
+    field: string,
+  ): Promise<void> {
+    await this.storage.dropIndex(collection_name, field);
+  }
+
+  public async _list_indexes(
+    collection_name: string,
+  ): Promise<CollectionIndex[]> {
+    return this.storage.listIndexes(collection_name);
+  }
+
+  public async _total_chunk_size(collection_name: string): Promise<number> {
+    return this.storage.totalChunkSize(collection_name);
   }
 
   public _turn_query_into_search_params(query: MongifyQuery): {
     key: string;
     value: any;
   } {
-    let key = Object.keys(query)[0];
-    let value = query[key];
-    return { key, value };
-  }
-
-  public _filter_array(
-    arr: MongifyDocument[],
-    key: string,
-    value: any,
-  ): MongifyDocument[] {
-    return arr.filter((obj) => obj[key] === value);
+    const key = Object.keys(query)[0];
+    return { key, value: query[key] };
   }
 
   public _filter_inverse_array(
@@ -142,11 +167,6 @@ export class Helpers {
     value: any,
   ): MongifyDocument[] {
     return arr.filter((obj) => obj[key] !== value);
-  }
-
-  public async _delete_file(json_name: string): Promise<boolean> {
-    await fs.unlink(json_name);
-    return true;
   }
 
   public async _list_files(): Promise<string[]> {
