@@ -145,7 +145,8 @@ const firstTwoUsers = await users.find({}, { limit: 2 });
 const matchingUsers = await users.find({ active: true }, { limit: "10" });
 ```
 
-`find` returns an array. `findOne` returns the first matching document, or an array when no document matches.
+`find` returns an array. `findOne` returns the first matching document, or `null`
+when no document matches.
 
 ## Indexes
 
@@ -221,11 +222,20 @@ interface IndexOptions {
 }
 
 interface Collection {
-  find(query?: Record<string, unknown>, options?: CollectionOptions): Promise<Record<string, unknown>[]>;
-  findOne(query?: Record<string, unknown>): Promise<Record<string, unknown> | Record<string, unknown>[]>;
+  find(
+    query?: Record<string, unknown>,
+    options?: CollectionOptions,
+  ): Promise<Record<string, unknown>[]>;
+  findOne(
+    query?: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null>;
   insert(document: Record<string, unknown>): Promise<boolean>;
   insertMany(documents: Record<string, unknown>[]): Promise<boolean>;
-  update(query: Record<string, unknown>, update: Record<string, unknown>, options?: UpdateOptions): Promise<boolean>;
+  update(
+    query: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: UpdateOptions,
+  ): Promise<boolean>;
   delete(query: Record<string, unknown>): Promise<boolean>;
   createIndex(field: string, options?: IndexOptions): Promise<boolean>;
   dropIndex(field: string): Promise<boolean>;
@@ -235,11 +245,11 @@ interface Collection {
 
 ## Chunk size
 
-The default maximum chunk size is 10 MiB. Change `CHUNK_SIZE_BYTES` in
+The default maximum chunk size is 4 MiB. Change `CHUNK_SIZE_BYTES` in
 `src/config.ts` when benchmarking different chunk sizes:
 
 ```ts
-export const CHUNK_SIZE_BYTES = 10 * 1024 * 1024;
+export const CHUNK_SIZE_BYTES = 4 * 1024 * 1024;
 ```
 
 A document larger than the configured limit is stored alone in an oversized chunk.

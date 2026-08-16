@@ -138,7 +138,7 @@ export class Operations {
     query?: MongifyQuery,
     options?: CollectionOptions,
     collection_name?: string,
-  ): Promise<MongifyDocument | MongifyDocument[]> {
+  ): Promise<MongifyDocument | null> {
     return this.helpers._with_collection_lock(collection_name!, async () => {
       const response = await this.helpers._find_documents(
         collection_name!,
@@ -146,7 +146,7 @@ export class Operations {
         1,
         true,
       );
-      return response[0] || response;
+      return response[0] ?? null;
     });
   }
 

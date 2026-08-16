@@ -190,7 +190,7 @@ describe("Mongify advanced indexed stress", { concurrency: 1 }, () => {
       (await collection.findOne({ index: updatedIndex })).benchmarkState,
       "updated",
     );
-    assert.deepEqual(await collection.findOne({ index: insertedIndex }), []);
+    assert.equal(await collection.findOne({ index: insertedIndex }), null);
   });
 
   test("rebuilds a missing persisted index", async () => {

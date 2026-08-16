@@ -25,7 +25,7 @@ async function main() {
   process.stdout.write(
     JSON.stringify({
       elapsedMilliseconds,
-      found: !Array.isArray(document),
+      found: document !== null,
       rssBefore: memoryBefore.rss,
       rssAfter: memoryAfter.rss,
       heapUsedBefore: memoryBefore.heapUsed,

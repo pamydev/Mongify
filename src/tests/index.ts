@@ -1,49 +1,58 @@
 import { Mongify } from "../mongify";
-const database = new Mongify({ database_name: "test_database" });
+const database = new Mongify({ database_name: "database_v2" });
 
-const createCollections = async () => {
-  await database.createCollection("users");
-  await database.createCollection("sells");
-  await database.createCollection("reports");
-  const collections = await database.listCollections();
-  console.log("Collections:", collections);
-  console.log("Collections created successfully!");
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    throw new TypeError("Duration must be a non-negative finite number");
+  }
+
+  if (milliseconds >= 1_000) {
+    return `${(milliseconds / 1_000).toFixed(1)}s`;
+  }
+
+  return `${Math.round(milliseconds)}ms`;
+}
+
+const createDummyFields = (count) => {
+  return Array.from({ length: count }, (_, index) => ({
+    key: `dummyField${index}`,
+    value: `dummyValue${index + "x".repeat(50)}`,
+  }));
 };
 
-const insertSells = async () => {
-  const sellsCollection = database.getCollection("sells");
-  sellsCollection.insertMany([
-    { item: "Laptop", price: 1200, quantity: 5 },
-    { item: "Phone", price: 800, quantity: 10 },
-    { item: "Tablet", price: 600, quantity: 7 },
-  ]);
-  sellsCollection.insert({ item: "Monitor", price: 300, quantity: 15 });
-  sellsCollection.insert({ item: "PC", price: 300, quantity: 15 });
-  sellsCollection.insert({ item: "Keyboard", price: 300, quantity: 15 });
-  sellsCollection.insert({ item: "Mouse", price: 300, quantity: 15 });
-  console.log("Sells inserted successfully!");
+const createDummyDocument = async (
+  collection_name,
+  total,
+  totalDummyFields,
+) => {
+  const maxTotal = 100_000;
+  const operations = Math.ceil(total / maxTotal);
+  for (let i = 0; i < operations; i += 1) {
+    const start = i * maxTotal;
+    const end = Math.min(start + maxTotal, total);
+    const collection = database.getCollection(collection_name);
+    await collection.insertMany(
+      Array.from({ length: end - start }, (_, index) => ({
+        index: start + index,
+        name: `document-${start + index}`,
+        ...Object.fromEntries(
+          createDummyFields(totalDummyFields).map(({ key, value }) => [
+            key,
+            value,
+          ]),
+        ),
+      })),
+    );
+  }
 };
 
-const insertUsers = async () => {
-  const usersCollection = database.getCollection("users");
-  await usersCollection.insertMany([
-    { name: "Alice", age: 30, email: "alice@example.com" },
-    { name: "Bob", age: 25, email: "bob@example.com" },
-    { name: "Charlie", age: 35, email: "charlie@example.com" },
-  ]);
-  console.log("Users inserted successfully!");
-};
-
-const findBob = async () => {
-  const usersCollection = database.getCollection("users");
-  const bob = await usersCollection.find({ name: "Bob" });
-  console.log("Found Bob:", bob);
-};
-
-createCollections()
-  .then(() => insertSells())
-  .then(() => insertUsers())
-  .then(() => findBob())
-  .catch((error) => {
-    console.error("Error:", error);
+(async () => {
+  const startedAt = performance.now();
+  console.log("starting...");
+  // await database.getCollection("users").createIndex("name");
+  let res = await database.getCollection("users").findOne({
+    name: "document-899000",
   });
+  const elapsedMilliseconds = performance.now() - startedAt;
+  console.log(res.index, formatDuration(elapsedMilliseconds));
+})();

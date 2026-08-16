@@ -83,12 +83,12 @@ describe("Mongify functional API", () => {
     assert.equal(activeUsers[0].active, true);
   });
 
-  test("findOne returns an empty array when no document matches", async () => {
+  test("findOne returns null when no document matches", async () => {
     const users = await database.createCollection("users");
 
     const result = await users.findOne({ name: "missing" });
 
-    assert.deepEqual(result, []);
+    assert.equal(result, null);
   });
 
   test("findOne scans until a non-indexed document matches", async () => {
@@ -213,7 +213,7 @@ describe("Mongify functional API", () => {
       { email: "new@example.com" },
     );
 
-    assert.deepEqual(await users.findOne({ email: "old@example.com" }), []);
+    assert.equal(await users.findOne({ email: "old@example.com" }), null);
     assert.equal(
       (await users.findOne({ email: "new@example.com" })).name,
       "Pamela",
@@ -221,7 +221,7 @@ describe("Mongify functional API", () => {
 
     await users.delete({ email: "new@example.com" });
 
-    assert.deepEqual(await users.findOne({ email: "new@example.com" }), []);
+    assert.equal(await users.findOne({ email: "new@example.com" }), null);
   });
 
   test("reports malformed JSON instead of silently replacing it", async () => {

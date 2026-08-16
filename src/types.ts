@@ -39,7 +39,7 @@ export interface Collection {
     query?: MongifyQuery,
     options?: CollectionOptions,
   ): Promise<MongifyDocument[]>;
-  findOne(query?: MongifyQuery): Promise<MongifyDocument | MongifyDocument[]>;
+  findOne(query?: MongifyQuery): Promise<MongifyDocument | null>;
   update(
     query: MongifyQuery,
     update: MongifyDocument,
