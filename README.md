@@ -1,9 +1,9 @@
 # Cedros Mongify
 
 [![Tests](https://github.com/pamydev/Mongify/actions/workflows/tests.yml/badge.svg)](https://github.com/pamydev/Mongify/actions/workflows/tests.yml)
-[![npm version](https://img.shields.io/npm/v/mongify.svg)](https://www.npmjs.com/package/mongify)
-[![npm downloads](https://img.shields.io/npm/dm/mongify.svg)](https://www.npmjs.com/package/mongify)
-[![license](https://img.shields.io/npm/l/mongify.svg)](https://www.npmjs.com/package/mongify)
+[![npm version](https://img.shields.io/npm/v/%40cedrosdev%2Fmongify.svg)](https://www.npmjs.com/package/@cedrosdev/mongify)
+[![npm downloads](https://img.shields.io/npm/dm/%40cedrosdev%2Fmongify.svg)](https://www.npmjs.com/package/@cedrosdev/mongify)
+[![license](https://img.shields.io/npm/l/%40cedrosdev%2Fmongify.svg)](https://www.npmjs.com/package/@cedrosdev/mongify)
 
 Mongify is an embedded document database for Node.js and TypeScript. It stores
 documents in size-limited JSON chunks, maintains persistent paged B+ tree
@@ -241,21 +241,21 @@ const pamela = await users.findOne({ email: "pamela@example.com" });
 
 ### Query operators
 
-| Operator | Meaning |
-| --- | --- |
-| `$lt` | Less than |
-| `$lte` | Less than or equal |
-| `$gt` | Greater than |
-| `$gte` | Greater than or equal |
-| `$in` | Matches at least one supplied value |
-| `$nin` | Does not match any supplied value |
-| `$and` | Every nested query must match |
-| `$or` | At least one nested query must match |
-| `$not` | Negates a query or field expression |
-| `$exists` | Checks whether a field is present |
-| `$type` | Checks the JavaScript value type |
-| `$regex` | Tests strings with a pattern |
-| `$options` | Supplies flags for `$regex` |
+| Operator   | Meaning                              |
+| ---------- | ------------------------------------ |
+| `$lt`      | Less than                            |
+| `$lte`     | Less than or equal                   |
+| `$gt`      | Greater than                         |
+| `$gte`     | Greater than or equal                |
+| `$in`      | Matches at least one supplied value  |
+| `$nin`     | Does not match any supplied value    |
+| `$and`     | Every nested query must match        |
+| `$or`      | At least one nested query must match |
+| `$not`     | Negates a query or field expression  |
+| `$exists`  | Checks whether a field is present    |
+| `$type`    | Checks the JavaScript value type     |
+| `$regex`   | Tests strings with a pattern         |
+| `$options` | Supplies flags for `$regex`          |
 
 Examples:
 
@@ -457,10 +457,7 @@ collection chunks. Index definitions remain in the collection manifest.
 ## Update documents
 
 ```ts
-await users.update(
-  { email: "pamela@example.com" },
-  { active: false },
-);
+await users.update({ email: "pamela@example.com" }, { active: false });
 ```
 
 `update()` shallow-merges the update object into every matching document and
@@ -596,9 +593,7 @@ interface Collection<T extends object = MongifyDocument> {
     options?: IndexOptions,
   ): Promise<CreateIndexResult>;
 
-  dropIndex(
-    field: IndexFields<StoredDocument<T>>,
-  ): Promise<boolean>;
+  dropIndex(field: IndexFields<StoredDocument<T>>): Promise<boolean>;
 
   listIndexes(): Promise<CollectionIndex[]>;
 }
