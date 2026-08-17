@@ -638,42 +638,22 @@ type StoredDocument<T extends object> = Omit<T, "_id"> & {
 };
 ```
 
-## Current limitations
+## Project scope
 
-- Mongify requires Node.js filesystem APIs. It does not run directly in a web
-  browser, React Native JavaScript runtime, Kotlin, or Swift application.
-- It is an embedded, single-machine database. It has no database server,
-  replication, clustering, remote protocol, or distributed locking.
-- Every operation, including reads, takes an exclusive per-collection lock.
-  Operations on one collection therefore execute sequentially.
-- Transactions and journals are scoped to one internal collection operation.
-  There is no public transaction API and no atomic transaction across multiple
-  collections.
-- Index acceleration applies to top-level equality queries that match an index
-  and to simple single-field `$lt`, `$lte`, `$gt`, and `$gte` ranges. Logical,
-  regex, membership, type, existence, and nested-object queries scan chunks.
-- Sorting materializes and sorts all matching documents in memory. It does not
-  currently use B+ tree order to execute the sort.
-- Projection and indexes address top-level fields only; dotted paths are not
-  supported.
-- Updates are shallow merges. Update operators such as `$set`, `$unset`,
-  `$inc`, and array update operators are not implemented.
-- Upsert is safest with equality-only queries; operator expressions are not
-  transformed into inserted values.
-- B+ tree deletion does not rebalance or merge underfilled pages. Rebuilding the
-  index compacts its page structure.
-- Stored values must be JSON-serializable, except for the explicit `Date`
-  extension. `BigInt` and circular references fail JSON serialization, while
-  functions, symbols, `undefined`, `NaN`, and infinite numbers retain normal
-  `JSON.stringify()` behavior.
-- TypeScript generics do not validate data at runtime and do not migrate existing
-  documents when a model changes.
-- Chunk and index settings are build-time constants, not constructor options.
-- The current chunked storage format is intentionally not backward-compatible
-  with databases created by pre-chunk Mongify versions.
-- Mongify is not intended as a drop-in replacement for SQLite, MongoDB, or a
-  client-server production database when relational queries, distributed access,
-  high same-collection concurrency, or mature operational tooling are required.
+Mongify is designed as an embedded document database for Node.js applications,
+desktop tools, local-first software, prototypes, and single-machine workloads.
+
+Keep these characteristics in mind:
+
+- Operations on the same collection are serialized to preserve consistency.
+- Indexes optimize top-level equality and range queries.
+- Sorting is currently performed in memory.
+- Transactions are scoped to individual collection operations.
+- Mongify supports JSON-compatible values plus native JavaScript Dates.
+- The storage format may evolve while the project is still new.
+
+For distributed databases, relational workloads, or remote multi-server access,
+consider a client-server database or SQLite alongside Mongify.
 
 ## Development
 
