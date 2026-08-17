@@ -31,13 +31,13 @@ their data in readable files.
 ## Installation
 
 ```bash
-npm install mongify
+npm install @cedrosdev/mongify
 ```
 
 ## Quick start
 
 ```ts
-import { Mongify } from "mongify";
+import { Mongify } from "@cedrosdev/mongify";
 
 const database = new Mongify({
   database_name: "my-app",
@@ -75,7 +75,7 @@ Pass a model to `createCollection()` or `getCollection()` to type inserts,
 queries, updates, sorting, projection, indexes, and returned documents:
 
 ```ts
-import { Mongify, type StoredDocument } from "mongify";
+import { Mongify, type StoredDocument } from "@cedrosdev/mongify";
 
 interface User {
   name: string;
