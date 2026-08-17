@@ -492,6 +492,97 @@ await users.delete({ active: false });
 `true`. Calling it through a handle for a missing collection is a no-op and does
 not create that collection.
 
+## Aggregation pipelines
+
+Mongify does not support aggregation pipelines due to its design for local work, and the cost of implementing a JavaScript aggregation is the same as reading the documents and filtering them in memory. Use `find()` with a query, projection, and sorting to retrieve documents, then process them in JavaScript. Here is an example of a simple aggregation using `find()`:
+
+```ts
+import { Mongify } from "@cedrosdev/mongify";
+
+const db = new Mongify({
+  database_name: "mongify-test",
+});
+
+interface Employee {
+  id: string;
+  name: string;
+  email?: string;
+  active?: boolean;
+}
+
+interface Sell {
+  id: string;
+  sellerId: string;
+  productName: string;
+  price: number;
+  date: Date;
+}
+
+(async () => {
+  //   await db.getCollection("employees").insertMany([
+  //     {
+  //       role: "seller",
+  //       name: "John Doe",
+  //       id: "john001",
+  //       email: "john.doe@example.com",
+  //     },
+  //     {
+  //       role: "comercial",
+  //       name: "Samantha Smith",
+  //       id: "sam001",
+  //       email: "samantha.smith@example.com",
+  //     },
+  //     {
+  //       role: "seller",
+  //       name: "Thiago Frota",
+  //       id: "thiag001",
+  //       email: "thiago.frota@example.com",
+  //     },
+  //   ]);
+
+  //   await db.getCollection("sells").insertMany([
+  //     {
+  //       id: "sell001",
+  //       sellerId: "john001",
+  //       productName: "Product A",
+  //       price: 100,
+  //       date: new Date("2024-06-01T10:00:00Z"),
+  //     },
+  //     {
+  //       id: "sell002",
+  //       sellerId: "sam001",
+  //       productName: "Product B",
+  //       price: 200,
+  //       date: new Date("2025-06-02T10:00:00Z"),
+  //     },
+  //     {
+  //       id: "sell003",
+  //       sellerId: "thiag001",
+  //       productName: "Product C",
+  //       price: 300,
+  //       date: new Date("2026-06-03T10:00:00Z"),
+  //     },
+  //   ]);
+
+  const res = await db.getCollection<Employee>("employees").find({
+    name: { $regex: "a", $options: "i" },
+  });
+  res.forEach(async (employee) => {
+    let sells = await db.getCollection<Sell>("sells").find({
+      sellerId: employee.id,
+    });
+    sells.forEach((sell) => {
+      console.table({
+        seller: employee.name,
+        product: sell.productName,
+        amount: sell.price,
+        data: sell.date.toISOString(),
+      });
+    });
+  });
+})();
+```
+
 ## Storage, durability, and concurrency
 
 Each collection has a small JSON manifest. Its documents live in numbered JSON
