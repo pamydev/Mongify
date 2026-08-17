@@ -1,6 +1,6 @@
 {
-  "name": "mongify",
-  "displayName": "Cedros Mongify",
+  "name": "@cedrosdev/mongify",
+  "displayName": "Cedros Development Mongify",
   "version": "1.1.12",
   "description": "A JSON object database that can be used to store and retrieve data in a structured way.",
   "main": "dist/mongify.js",
